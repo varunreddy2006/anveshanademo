@@ -36,6 +36,8 @@ body {
 }
 
 button,
-a {
+a,
+input,
+select {
   transition: all 150ms ease;
 }
