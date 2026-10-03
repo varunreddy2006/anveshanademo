@@ -1,0 +1,39 @@
+node_modules/
+frontend/node_modules/
+frontend/dist/
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/.pytest_cache/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+coverage/
+
+# AI model weights and media (large files)
+*.pt
+*.pth
+*.onnx
+models/
+*.mp4
+*.avi
+*.mov
+backend/uploads/
+backend/evidence/
+
+# Database files (SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python extras
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor
+.vscode/
