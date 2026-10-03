@@ -14,7 +14,8 @@ The base project contains a working frontend shell and a backend health endpoint
 
 ## Notes
 
-- SQLite is the default local development database for Phase 1 and remains easy to swap later by changing `DATABASE_URL`.
+- SQLite is the default local development database and remains easy to swap later by changing `DATABASE_URL`.
 - SQLAlchemy and Alembic are kept in place so the project can move to PostgreSQL without reworking the model layer.
+- Phase 2 adds a minimal SQLite-backed auth layer with `safety_officer` and `administrator` roles, plus login audit logging.
 - The frontend calls the backend through the Vite proxy defined in `frontend/vite.config.ts`.
 - Secrets stay in `.env` and never in source code.

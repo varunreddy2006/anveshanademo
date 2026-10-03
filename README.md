@@ -32,6 +32,12 @@ cd backend
 - Update `.env` from `.env.example` before running the app.
 - Alembic migrations are configured under `backend/alembic` and can be pointed to PostgreSQL later by changing `DATABASE_URL`.
 
+## Phase 2 status
+
+- SQLite-backed minimal auth is implemented for registration, login, logout, and two roles: `safety_officer` and `administrator`.
+- Backend role checks protect authorized endpoints, and each successful login writes an audit record.
+- Frontend auth pages now send real requests to the API and persist the session token locally.
+
 ## Next phase
 
-Phase 1 adds the landing page, authentication shell, and dashboard layout with route-based sections.
+Phase 3 will add the first real operational workflows beyond the auth shell.

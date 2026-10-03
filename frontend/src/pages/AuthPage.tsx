@@ -1,7 +1,46 @@
 import { ShieldCheck } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { type FormEvent, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+
+const ROLE_OPTIONS = [
+  { value: 'safety_officer', label: 'Safety Officer' },
+  { value: 'administrator', label: 'Administrator' },
+]
 
 export function LoginPage() {
+  const navigate = useNavigate()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.detail || 'Unable to sign in.')
+      }
+
+      window.localStorage.setItem('safety_auth_token', data.access_token)
+      window.localStorage.setItem('safety_user', JSON.stringify(data.user))
+      navigate('/dashboard', { replace: true })
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to sign in.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-10 text-slate-100">
       <div className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900 p-8 shadow-soft">
@@ -15,24 +54,41 @@ export function LoginPage() {
           </div>
         </div>
 
-        <form className="space-y-5">
+        <form className="space-y-5" onSubmit={handleSubmit}>
           <div>
             <label className="mb-2 block text-sm text-slate-300">Work email</label>
-            <input className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none ring-0 placeholder:text-slate-500 focus:border-blue-500" placeholder="officer@factory.com" />
+            <input
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none ring-0 placeholder:text-slate-500 focus:border-blue-500"
+              placeholder="officer@factory.com"
+              required
+            />
           </div>
 
           <div>
             <label className="mb-2 block text-sm text-slate-300">Password</label>
-            <input type="password" className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="••••••••" />
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500"
+              placeholder="••••••••"
+              required
+            />
           </div>
 
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-            Demo mode available. This is a frontend-only authentication shell for Phase 1.
-          </div>
+          {error ? (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</div>
+          ) : null}
 
-          <Link to="/dashboard" className="block rounded-xl bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white hover:bg-blue-500">
-            Sign in
-          </Link>
+          <button
+            type="submit"
+            disabled={loading}
+            className="block w-full rounded-xl bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? 'Signing in...' : 'Sign in'}
+          </button>
         </form>
 
         <p className="mt-6 text-center text-sm text-slate-400">
@@ -45,6 +101,39 @@ export function LoginPage() {
 }
 
 export function RegisterPage() {
+  const navigate = useNavigate()
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [role, setRole] = useState('safety_officer')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      const response = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ full_name: fullName, email, password, role }),
+      })
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.detail || 'Unable to create account.')
+      }
+
+      navigate('/login', { replace: true })
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to create account.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-10 text-slate-100">
       <div className="w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-900 p-8 shadow-soft">
@@ -58,45 +147,70 @@ export function RegisterPage() {
           </div>
         </div>
 
-        <form className="space-y-4">
+        <form className="space-y-4" onSubmit={handleSubmit}>
           <div className="grid gap-4 md:grid-cols-2">
             <div>
               <label className="mb-2 block text-sm text-slate-300">Full name</label>
-              <input className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="A. Sharma" />
+              <input
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500"
+                placeholder="A. Sharma"
+                required
+              />
             </div>
             <div>
               <label className="mb-2 block text-sm text-slate-300">Role</label>
-              <select className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-blue-500">
-                <option>Safety Officer</option>
-                <option>Administrator</option>
+              <select
+                value={role}
+                onChange={(event) => setRole(event.target.value)}
+                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-blue-500"
+              >
+                {ROLE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
 
           <div>
             <label className="mb-2 block text-sm text-slate-300">Work email</label>
-            <input className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="name@company.com" />
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500"
+              placeholder="name@company.com"
+              required
+            />
           </div>
 
           <div>
-            <label className="mb-2 block text-sm text-slate-300">Organization</label>
-            <input className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="North Plant Operations" />
+            <label className="mb-2 block text-sm text-slate-300">Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500"
+              placeholder="••••••••"
+              minLength={8}
+              required
+            />
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-2 block text-sm text-slate-300">Password</label>
-              <input type="password" className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="••••••••" />
-            </div>
-            <div>
-              <label className="mb-2 block text-sm text-slate-300">Confirm password</label>
-              <input type="password" className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none placeholder:text-slate-500 focus:border-blue-500" placeholder="••••••••" />
-            </div>
-          </div>
+          {error ? (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</div>
+          ) : null}
 
-          <Link to="/dashboard" className="block rounded-xl bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white hover:bg-blue-500">
-            Create account
-          </Link>
+          <button
+            type="submit"
+            disabled={loading}
+            className="block w-full rounded-xl bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? 'Creating account...' : 'Create account'}
+          </button>
         </form>
 
         <p className="mt-6 text-center text-sm text-slate-400">

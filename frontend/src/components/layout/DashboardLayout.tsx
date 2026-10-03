@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   Camera,
@@ -23,7 +23,42 @@ const navItems = [
   { to: '/dashboard/settings', label: 'Settings', icon: Settings },
 ]
 
+function getUserSession() {
+  const raw = window.localStorage.getItem('safety_user')
+  if (!raw) {
+    return null
+  }
+
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
 export function DashboardLayout() {
+  const navigate = useNavigate()
+  const user = getUserSession()
+
+  async function handleLogout() {
+    const token = window.localStorage.getItem('safety_auth_token')
+
+    if (token) {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }).catch(() => undefined)
+    }
+
+    window.localStorage.removeItem('safety_auth_token')
+    window.localStorage.removeItem('safety_user')
+    navigate('/login', { replace: true })
+  }
+
+  const roleLabel = user?.role === 'administrator' ? 'Administrator' : 'Safety Officer'
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto flex max-w-7xl gap-6 px-4 py-6 lg:px-6">
@@ -58,17 +93,18 @@ export function DashboardLayout() {
 
           <div className="mt-8 rounded-2xl border border-slate-800 bg-slate-950 p-4">
             <p className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">Session</p>
-            <p className="font-medium text-white">Safety Officer</p>
-            <p className="text-sm text-slate-400">demo@industrial.ai</p>
+            <p className="font-medium text-white">{roleLabel}</p>
+            <p className="text-sm text-slate-400">{user?.email || 'No session'}</p>
           </div>
 
-          <NavLink
-            to="/"
-            className="mt-6 flex items-center gap-3 rounded-xl border border-slate-800 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="mt-6 flex w-full items-center gap-3 rounded-xl border border-slate-800 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
           >
             <LogOut className="h-4 w-4" />
             Logout
-          </NavLink>
+          </button>
         </aside>
 
         <div className="flex-1 rounded-3xl border border-slate-800 bg-slate-900 shadow-soft">
