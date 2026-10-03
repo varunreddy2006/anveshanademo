@@ -37,3 +37,4 @@ __pycache__/
 
 # Editor
 .vscode/
+*.exe
