@@ -44,3 +44,23 @@ cd backend
 - Authenticated zone CRUD is available at `/api/zones`, with normalized rectangular or polygon geometry plus crowd and confidence thresholds.
 - The Camera Management and Zones & Thresholds dashboard pages use these API endpoints.
 - New resource tables are created automatically on backend startup for the default SQLite database.
+- Zone types are `normal`, `restricted`, and `hazard_machinery`; the migration adds `normal` to legacy zones and preserves their existing geometry and thresholds.
+- Run `.\.venv\Scripts\python.exe -m alembic upgrade head` from `backend` when upgrading an existing database.
+- Rectangular zones can be drawn on a processed camera frame or a selected frame from a local MP4; polygons retain the existing normalized-point editor.
+
+## Phase 5 status
+
+- Live Monitoring starts a real OpenCV capture for webcam device `0` or a configured RTSP/HTTP(S) stream. Connection state is reported as Connected, Not connected, or Error; uploads are labeled as test video and are never presented as a live source.
+- Authenticated MP4 upload validates the file type and a 100 MB limit, reports transfer and analysis progress, and presents annotated sampled frames.
+- CPU-based YOLOv8n person tracking samples every third frame. Configured zones drive restricted-zone entry, hazard-zone proximity, and crowd-threshold events; each event stores an evidence JPEG and creates an alert.
+- PPE and fire/smoke model adapters report `AI model unavailable` until matching `.pt` weights are placed in the repository `models` directory. YOLOv8n weights can be placed there as `yolov8n.pt`; otherwise Ultralytics resolves its pretrained `yolov8n.pt` model.
+- Persisted datetimes are normalized as UTC, including legacy naive SQLite timestamps. Events, alerts, and the administrator-only `/api/audit-logs` endpoint serialize timestamps as ISO 8601 with a `Z` suffix; timestamp displays use the browser's local timezone.
+
+Install the backend requirements to enable camera capture, MP4 processing, and YOLO:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+The webcam is the camera visible to the machine running the backend. Camera streams and MP4s are processed by that backend. Uploaded test videos and evidence frames are stored under `backend/uploads` and `backend/evidence` and are excluded from version control.

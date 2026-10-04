@@ -19,9 +19,12 @@ interface ZoneBase {
   id: number
   name: string
   camera_id: number | null
+  zone_type: ZoneType
   crowd_threshold: number
   confidence_threshold: number
 }
+
+export type ZoneType = 'normal' | 'restricted' | 'hazard_machinery'
 
 export type Zone = ZoneBase &
   (
@@ -46,10 +49,109 @@ export type PolygonCoordinates = PolygonPoint[]
 export interface ZoneInput {
   name: string
   camera_id: number | null
+  zone_type: ZoneType
   shape_type: Zone['shape_type']
   coordinates: Zone['coordinates']
   crowd_threshold: number
   confidence_threshold: number
+}
+
+export interface CameraVisionStatus {
+  key?: string
+  camera_id: number
+  source_type?: string
+  status: 'Connected' | 'Not connected' | 'Error'
+  error?: string | null
+  progress?: number
+  processed_frames?: number
+  total_frames?: number | null
+  completed?: boolean
+}
+
+export interface DetectionEvent {
+  id: number
+  camera_id: number | null
+  camera_name: string
+  event_type: string
+  zone_name: string
+  detail: string
+  frame_index: number
+  evidence_url: string
+  created_at: string
+}
+
+export interface SafetyAlert extends DetectionEvent {
+  alert_id: number
+  status: string
+  severity: 'High' | 'Medium'
+}
+
+export function formatLocalTimestamp(timestamp: string): string {
+  return new Date(timestamp).toLocaleString()
+}
+
+export interface VisionModels {
+  ppe: string
+  fire_smoke: string
+}
+
+export interface UploadJob extends CameraVisionStatus {
+  job_id?: string
+}
+
+export async function apiBlob(path: string): Promise<Blob> {
+  const token = window.localStorage.getItem('safety_auth_token')
+  const headers = new Headers()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const response = await fetch(path, { headers, cache: 'no-store' })
+  if (!response.ok) {
+    throw new Error(response.status === 404 ? 'No processed frame is available yet.' : 'Unable to load the processed frame.')
+  }
+  return response.blob()
+}
+
+export function uploadVideo(
+  cameraId: number,
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<UploadJob> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', `/api/cameras/${cameraId}/uploads`)
+    const token = window.localStorage.getItem('safety_auth_token')
+    if (token) {
+      request.setRequestHeader('Authorization', `Bearer ${token}`)
+    }
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    }
+    request.onerror = () => reject(new Error('Unable to upload the MP4. Check the server connection and try again.'))
+    request.onload = () => {
+      let data: unknown
+      try {
+        data = JSON.parse(request.responseText)
+      } catch {
+        reject(new Error('The server returned an invalid upload response.'))
+        return
+      }
+      if (request.status < 200 || request.status >= 300) {
+        const detail =
+          typeof data === 'object' && data !== null && 'detail' in data && typeof data.detail === 'string'
+            ? data.detail
+            : 'The MP4 upload failed.'
+        reject(new Error(detail))
+        return
+      }
+      resolve(data as UploadJob)
+    }
+    const body = new FormData()
+    body.append('file', file)
+    request.send(body)
+  })
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {

@@ -1,20 +1,53 @@
 import hashlib
 import secrets
+import threading
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, root_validator, validator
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.types import TypeDecorator
 
 from app.core.config import settings
+from app import vision
 
 Base = declarative_base()
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    impl = DateTime
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        return dialect.type_descriptor(DateTime(timezone=dialect.name != "sqlite"))
+
+    def process_bind_param(self, value: datetime | None, dialect):
+        if value is None:
+            return None
+        normalized = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        if dialect.name == "sqlite":
+            return normalized.replace(tzinfo=None)
+        return normalized
+
+    def process_result_value(self, value: datetime | None, dialect):
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def serialize_utc_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return normalized.isoformat().replace("+00:00", "Z")
+
 
 engine = create_engine(
     settings.database_url,
@@ -37,7 +70,7 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     role = Column(String(40), nullable=False, default=UserRole.SAFETY_OFFICER.value)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class SessionToken(Base):
@@ -46,7 +79,7 @@ class SessionToken(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     token_hash = Column(String(255), unique=True, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class AuditLog(Base):
@@ -57,7 +90,7 @@ class AuditLog(Base):
     email = Column(String(255), nullable=False)
     role = Column(String(40), nullable=False)
     action = Column(String(40), nullable=False, default="login")
-    logged_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    logged_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class Camera(Base):
@@ -70,7 +103,7 @@ class Camera(Base):
     status = Column(String(20), nullable=False, default="disconnected")
     username = Column(String(255), nullable=True)
     password = Column(String(255), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class Zone(Base):
@@ -79,11 +112,34 @@ class Zone(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(120), nullable=False)
     camera_id = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True)
+    zone_type = Column(String(32), nullable=False, default="normal", server_default="normal")
     shape_type = Column(String(20), nullable=False)
     coordinates = Column(JSON, nullable=False)
     crowd_threshold = Column(Integer, nullable=False)
     confidence_threshold = Column(Float, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class DetectionEvent(Base):
+    __tablename__ = "detection_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(80), nullable=False)
+    zone_name = Column(String(120), nullable=False)
+    detail = Column(String(500), nullable=False)
+    evidence_filename = Column(String(255), nullable=False)
+    frame_index = Column(Integer, nullable=False)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class SafetyAlert(Base):
+    __tablename__ = "safety_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("detection_events.id", ondelete="CASCADE"), unique=True, nullable=False)
+    status = Column(String(30), nullable=False, default="Open")
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class RegisterRequest(BaseModel):
@@ -168,9 +224,16 @@ class ZoneShape(str, Enum):
     POLYGON = "polygon"
 
 
+class ZoneType(str, Enum):
+    NORMAL = "normal"
+    RESTRICTED = "restricted"
+    HAZARD_MACHINERY = "hazard_machinery"
+
+
 class ZoneFields(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     camera_id: int | None = None
+    zone_type: ZoneType = ZoneType.NORMAL
     shape_type: ZoneShape
     coordinates: Any
     crowd_threshold: int = Field(..., ge=1, le=100_000)
@@ -219,16 +282,23 @@ class ZoneCreate(ZoneFields):
 class ZoneUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     camera_id: int | None = None
+    zone_type: ZoneType | None = None
     shape_type: ZoneShape | None = None
     coordinates: Any = None
     crowd_threshold: int | None = Field(default=None, ge=1, le=100_000)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)
 
 
+class VisionStartRequest(BaseModel):
+    source: str = Field(default="stream", regex="^(webcam|stream)$")
+    stream_url: str | None = Field(default=None, max_length=1000)
+
+
 class ZonePublic(BaseModel):
     id: int
     name: str
     camera_id: int | None
+    zone_type: str = "normal"
     shape_type: str
     coordinates: Any
     crowd_threshold: int
@@ -255,6 +325,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+vision_event_store_lock = threading.RLock()
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -464,6 +536,7 @@ def create_zone(
     zone = Zone(
         name=payload.name,
         camera_id=payload.camera_id,
+        zone_type=payload.zone_type.value,
         shape_type=payload.shape_type.value,
         coordinates=payload.coordinates,
         crowd_threshold=payload.crowd_threshold,
@@ -489,6 +562,7 @@ def update_zone(
     merged_values = {
         "name": zone.name,
         "camera_id": zone.camera_id,
+        "zone_type": zone.zone_type or ZoneType.NORMAL.value,
         "shape_type": zone.shape_type,
         "coordinates": zone.coordinates,
         "crowd_threshold": zone.crowd_threshold,
@@ -499,6 +573,7 @@ def update_zone(
     validate_zone_camera(db, validated.camera_id)
     zone.name = validated.name
     zone.camera_id = validated.camera_id
+    zone.zone_type = validated.zone_type.value
     zone.shape_type = validated.shape_type.value
     zone.coordinates = validated.coordinates
     zone.crowd_threshold = validated.crowd_threshold
@@ -519,6 +594,338 @@ def delete_zone(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Zone not found")
     db.delete(zone)
     db.commit()
+
+
+def vision_zones(db: Session, camera_id: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": zone.id,
+            "name": zone.name,
+            "camera_id": zone.camera_id,
+            "zone_type": zone.zone_type or ZoneType.NORMAL.value,
+            "shape_type": zone.shape_type,
+            "coordinates": zone.coordinates,
+            "crowd_threshold": zone.crowd_threshold,
+            "confidence_threshold": zone.confidence_threshold,
+        }
+        for zone in db.query(Zone).filter((Zone.camera_id == camera_id) | (Zone.camera_id.is_(None))).all()
+    ]
+
+
+def persist_vision_event(
+    camera_id: int,
+    event_type: str,
+    zone_name: str,
+    detail: str,
+    evidence: bytes,
+    frame_index: int,
+) -> None:
+    with vision_event_store_lock:
+        db = SessionLocal()
+        evidence_filename = vision.save_evidence(evidence)
+        try:
+            event = DetectionEvent(
+                camera_id=camera_id,
+                event_type=event_type,
+                zone_name=zone_name,
+                detail=detail,
+                evidence_filename=evidence_filename,
+                frame_index=frame_index,
+            )
+            db.add(event)
+            db.flush()
+            db.add(SafetyAlert(event_id=event.id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            vision.get_evidence_path(evidence_filename).unlink(missing_ok=True)
+            raise
+        finally:
+            db.close()
+
+
+@app.get(f"{settings.api_v1_prefix}/vision/models")
+def get_vision_models(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, str]:
+    return vision.adapter_status()
+
+
+@app.post(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/vision/start")
+def start_camera_vision(
+    camera_id: int,
+    payload: VisionStartRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if camera is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+
+    stream_url = payload.stream_url or camera.stream_url
+    if payload.source == "stream":
+        if not stream_url:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Add a stream URL to this camera first")
+        try:
+            parsed = urlsplit(stream_url)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Stream URL is invalid") from error
+        if parsed.scheme not in {"rtsp", "rtsps", "http", "https"} or parsed.username is not None or parsed.password is not None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Use an RTSP/HTTP(S) URL without embedded credentials")
+
+    try:
+        worker = vision.start_camera(
+            camera_id=camera_id,
+            source_type=payload.source,
+            source_url=stream_url,
+            zones=vision_zones(db, camera_id),
+            event_callback=persist_vision_event,
+            credential_username=camera.username,
+            credential_password=camera.password,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    return vision.worker_snapshot(worker)
+
+
+@app.post(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/vision/stop")
+def stop_camera_vision(
+    camera_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.query(Camera).filter(Camera.id == camera_id).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    worker = vision.stop_camera(camera_id)
+    if worker is None:
+        return {"camera_id": camera_id, "status": "Not connected"}
+    return vision.worker_snapshot(worker)
+
+
+@app.get(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/vision/status")
+def camera_vision_status(
+    camera_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.query(Camera).filter(Camera.id == camera_id).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    worker = vision.get_worker(f"camera-{camera_id}")
+    return vision.worker_snapshot(worker) if worker else {"camera_id": camera_id, "status": "Not connected"}
+
+
+@app.get(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/vision/frame")
+def camera_vision_frame(
+    camera_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if db.query(Camera).filter(Camera.id == camera_id).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    worker = vision.get_worker(f"camera-{camera_id}")
+    frame = vision.latest_frame(worker) if worker else None
+    if frame is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No processed frame is available")
+    from fastapi.responses import Response
+
+    return Response(content=frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads"
+
+
+@app.post(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/uploads", status_code=status.HTTP_202_ACCEPTED)
+async def upload_test_video(
+    camera_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.query(Camera).filter(Camera.id == camera_id).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    if Path(file.filename or "").suffix.lower() != ".mp4" or file.content_type != "video/mp4":
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Upload an MP4 video (video/mp4)")
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    temporary_path = UPLOAD_DIR / f"{secrets.token_hex(16)}.mp4"
+    size = 0
+    first_bytes = b""
+    try:
+        with temporary_path.open("wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="MP4 must be 100 MB or smaller")
+                if len(first_bytes) < 12:
+                    first_bytes += chunk[: 12 - len(first_bytes)]
+                destination.write(chunk)
+        if len(first_bytes) < 8 or first_bytes[4:8] != b"ftyp":
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="The uploaded file is not a valid MP4 video")
+        worker = vision.start_upload(
+            camera_id=camera_id,
+            file_path=str(temporary_path),
+            zones=vision_zones(db, camera_id),
+            event_callback=persist_vision_event,
+        )
+        return {"job_id": worker.key[len("upload-"):], **vision.worker_snapshot(worker)}
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+
+@app.get(f"{settings.api_v1_prefix}/uploads/{{job_id}}")
+def get_upload_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    result = vision.upload_status(job_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload job not found")
+    return result
+
+
+@app.get(f"{settings.api_v1_prefix}/uploads/{{job_id}}/frame")
+def get_upload_frame(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    frame = vision.upload_frame(job_id)
+    if frame is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No processed frame is available")
+    from fastapi.responses import Response
+
+    return Response(content=frame, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+def event_payload(event: DetectionEvent, camera: Camera | None) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "camera_id": event.camera_id,
+        "camera_name": camera.name if camera else "Deleted camera",
+        "event_type": event.event_type,
+        "zone_name": event.zone_name,
+        "detail": event.detail,
+        "frame_index": event.frame_index,
+        "evidence_url": f"{settings.api_v1_prefix}/events/{event.id}/evidence",
+        "created_at": serialize_utc_datetime(event.created_at),
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/events")
+def list_detection_events(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    return [
+        event_payload(event, db.query(Camera).filter(Camera.id == event.camera_id).first() if event.camera_id else None)
+        for event in db.query(DetectionEvent).order_by(DetectionEvent.created_at.desc()).limit(100).all()
+    ]
+
+
+@app.delete(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/events")
+def clear_camera_detection_data(
+    camera_id: int,
+    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    if db.query(Camera).filter(Camera.id == camera_id).first() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+
+    with vision_event_store_lock:
+        events = db.query(DetectionEvent).filter(DetectionEvent.camera_id == camera_id).all()
+        event_ids = [event.id for event in events]
+        evidence_filenames = [event.evidence_filename for event in events]
+        alerts_deleted = (
+            db.query(SafetyAlert).filter(SafetyAlert.event_id.in_(event_ids)).count()
+            if event_ids
+            else 0
+        )
+
+        if event_ids:
+            db.query(SafetyAlert).filter(SafetyAlert.event_id.in_(event_ids)).delete(synchronize_session=False)
+            db.query(DetectionEvent).filter(DetectionEvent.id.in_(event_ids)).delete(synchronize_session=False)
+            db.commit()
+
+        failed_files = []
+        for filename in evidence_filenames:
+            try:
+                vision.get_evidence_path(filename).unlink(missing_ok=True)
+            except OSError:
+                failed_files.append(filename)
+        if failed_files:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Detection records were cleared, but {len(failed_files)} evidence frame(s) could not be deleted",
+            )
+
+    return {
+        "camera_id": camera_id,
+        "events_deleted": len(event_ids),
+        "alerts_deleted": alerts_deleted,
+        "evidence_deleted": len(evidence_filenames),
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/events/{{event_id}}/evidence")
+def get_event_evidence(
+    event_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    event = db.query(DetectionEvent).filter(DetectionEvent.id == event_id).first()
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+    evidence_path = vision.get_evidence_path(event.evidence_filename)
+    if not evidence_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence frame is unavailable")
+    from fastapi.responses import FileResponse
+
+    return FileResponse(evidence_path, media_type="image/jpeg")
+
+
+@app.get(f"{settings.api_v1_prefix}/alerts")
+def list_safety_alerts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    rows = (
+        db.query(SafetyAlert, DetectionEvent)
+        .join(DetectionEvent, SafetyAlert.event_id == DetectionEvent.id)
+        .order_by(SafetyAlert.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            **event_payload(event, db.query(Camera).filter(Camera.id == event.camera_id).first() if event.camera_id else None),
+            "alert_id": alert.id,
+            "status": alert.status,
+            "severity": "High" if event.event_type == "Restricted-zone entry" else "Medium",
+            "created_at": serialize_utc_datetime(alert.created_at),
+        }
+        for alert, event in rows
+    ]
+
+
+@app.get(f"{settings.api_v1_prefix}/audit-logs")
+def list_audit_logs(
+    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": log.id,
+            "user_id": log.user_id,
+            "email": log.email,
+            "role": log.role,
+            "action": log.action,
+            "logged_at": serialize_utc_datetime(log.logged_at),
+        }
+        for log in db.query(AuditLog).order_by(AuditLog.logged_at.desc()).limit(100).all()
+    ]
 
 
 @app.get(f"{settings.api_v1_prefix}/auth/safety-check")
