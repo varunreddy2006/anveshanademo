@@ -1,18 +1,20 @@
 import hashlib
+import csv
+import io
 import logging
 import secrets
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, root_validator, validator
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, create_engine, func, or_
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
@@ -914,6 +916,186 @@ def clear_simulated_risk_history(
     return {"samples_deleted": deleted}
 
 
+def report_period_bounds(period: str, report_date: date) -> tuple[datetime, datetime]:
+    start_date = report_date
+    if period == "week":
+        start_date = report_date - timedelta(days=report_date.weekday())
+        end_date = start_date + timedelta(days=7)
+    elif period == "month":
+        start_date = report_date.replace(day=1)
+        end_date = (start_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+    elif period == "day":
+        end_date = start_date + timedelta(days=1)
+    else:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Period must be day, week, or month")
+    return (
+        datetime.combine(start_date, datetime.min.time(), timezone.utc),
+        datetime.combine(end_date, datetime.min.time(), timezone.utc),
+    )
+
+
+def report_data(db: Session, start: datetime, end: datetime) -> dict[str, Any]:
+    period_events = db.query(DetectionEvent).filter(
+        DetectionEvent.created_at >= start,
+        DetectionEvent.created_at < end,
+    )
+    by_type = [
+        {"name": event_type, "count": count}
+        for event_type, count in (
+            period_events.with_entities(DetectionEvent.event_type, func.count(DetectionEvent.id))
+            .group_by(DetectionEvent.event_type)
+            .order_by(DetectionEvent.event_type)
+            .all()
+        )
+    ]
+    by_zone = [
+        {"name": zone_name, "count": count}
+        for zone_name, count in (
+            period_events.with_entities(DetectionEvent.zone_name, func.count(DetectionEvent.id))
+            .group_by(DetectionEvent.zone_name)
+            .order_by(DetectionEvent.zone_name)
+            .all()
+        )
+    ]
+    zones = db.query(Zone).order_by(Zone.name).all()
+    now = datetime.now(timezone.utc)
+    zone_risks = [
+        {
+            "zone_id": zone.id,
+            "zone_name": zone.name,
+            **calculate_zone_risk(db, zone, zones, now),
+        }
+        for zone in zones
+    ]
+    includes_simulated = (
+        db.query(RiskScoreHistory.id)
+        .filter(RiskScoreHistory.is_simulated.is_(True))
+        .first()
+        is not None
+    )
+    return {
+        "start": serialize_utc_datetime(start),
+        "end": serialize_utc_datetime(end),
+        "total_incidents": period_events.count(),
+        "by_type": by_type,
+        "by_zone": by_zone,
+        "zone_risks": zone_risks,
+        "includes_simulated": includes_simulated,
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/reports/summary")
+def get_report_summary(
+    start: datetime,
+    end: datetime,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if end <= start:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Report end must be after start")
+    return report_data(db, start, end)
+
+
+@app.get(f"{settings.api_v1_prefix}/reports/pdf")
+def download_pdf_report(
+    period: str = Query(default="day"),
+    report_date: date | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    if period not in {"day", "week", "month"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Period must be day, week, or month")
+    report_date = report_date or datetime.now(timezone.utc).date()
+    if (start is None) != (end is None):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Provide both report start and end")
+    if start is None or end is None:
+        start, end = report_period_bounds(period, report_date)
+    elif end <= start:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Report end must be after start")
+    data = report_data(db, start, end)
+    buffer = io.BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.65 * inch,
+        leftMargin=0.65 * inch,
+        topMargin=0.6 * inch,
+        bottomMargin=0.6 * inch,
+        title="Industrial Safety Incident Report",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportNote", parent=styles["BodyText"], alignment=TA_LEFT, textColor=colors.HexColor("#334155")))
+    elements = [
+        Paragraph("Industrial Safety Incident Report", styles["Title"]),
+        Paragraph(
+            f"{period.title()} report · {start.date().isoformat()} through {(end - timedelta(days=1)).date().isoformat()}",
+            styles["BodyText"],
+        ),
+        Spacer(1, 12),
+        Paragraph(f"Total incidents: <b>{data['total_incidents']}</b>", styles["Heading2"]),
+    ]
+    if data["includes_simulated"]:
+        elements.extend(
+            [
+                Spacer(1, 6),
+                Paragraph("<b>Includes SIMULATED data</b> in the risk history charts. Simulated history is separate from real incidents.", styles["ReportNote"]),
+            ]
+        )
+
+    def append_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
+        elements.extend([Spacer(1, 12), Paragraph(title, styles["Heading2"])])
+        table_rows = [headers, *rows] if rows else [headers, ["No data", *("" for _ in headers[1:])]]
+        table = Table(table_rows, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f1f5f9")]),
+                ]
+            )
+        )
+        elements.append(table)
+
+    append_table("Incidents by event type", ["Event type", "Count"], [[row["name"], str(row["count"])] for row in data["by_type"]])
+    append_table("Incidents by zone", ["Zone", "Count"], [[row["name"], str(row["count"])] for row in data["by_zone"]])
+    append_table(
+        "Current zone risk scores",
+        ["Zone", "Score", "Trend"],
+        [[row["zone_name"], f"{row['score']}/100", row["trend"]] for row in data["zone_risks"]],
+    )
+    elements.extend(
+        [
+            Spacer(1, 18),
+            Paragraph(
+                "Risk scores are calculated indicators and are not validated predictions. AI detections may be incorrect and require human review.",
+                styles["ReportNote"],
+            ),
+        ]
+    )
+    document.build(elements)
+    from fastapi.responses import Response
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="safety-report-{period}-{report_date.isoformat()}.pdf"'},
+    )
+
+
 @app.get(f"{settings.api_v1_prefix}/vision/models")
 def get_vision_models(
     current_user: User = Depends(get_current_user),
@@ -1082,6 +1264,142 @@ def event_payload(event: DetectionEvent, camera: Camera | None) -> dict[str, Any
         "evidence_url": f"{settings.api_v1_prefix}/events/{event.id}/evidence",
         "created_at": serialize_utc_datetime(event.created_at),
     }
+
+
+def filtered_incident_query(
+    db: Session,
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    zone_id: int | None,
+    camera_id: int | None,
+    event_type: str | None,
+    search: str | None,
+):
+    query = (
+        db.query(DetectionEvent, Camera, SafetyAlert)
+        .outerjoin(Camera, Camera.id == DetectionEvent.camera_id)
+        .outerjoin(SafetyAlert, SafetyAlert.event_id == DetectionEvent.id)
+    )
+    if start is not None:
+        query = query.filter(DetectionEvent.created_at >= start)
+    if end is not None:
+        query = query.filter(DetectionEvent.created_at < end)
+    if zone_id is not None:
+        query = query.filter(
+            or_(
+                DetectionEvent.zone_id == zone_id,
+                (DetectionEvent.zone_id.is_(None))
+                & (DetectionEvent.zone_name == db.query(Zone.name).filter(Zone.id == zone_id).scalar_subquery()),
+            )
+        )
+    if camera_id is not None:
+        query = query.filter(DetectionEvent.camera_id == camera_id)
+    if event_type:
+        query = query.filter(DetectionEvent.event_type == event_type)
+    if search:
+        search_pattern = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                DetectionEvent.zone_name.ilike(search_pattern),
+                DetectionEvent.event_type.ilike(search_pattern),
+                DetectionEvent.detail.ilike(search_pattern),
+                Camera.name.ilike(search_pattern),
+            )
+        )
+    return query
+
+
+def incident_payload(event: DetectionEvent, camera: Camera | None, alert: SafetyAlert | None) -> dict[str, Any]:
+    return {
+        **event_payload(event, camera),
+        "alert_id": alert.id if alert else None,
+        "alert_status": alert.status if alert else None,
+        "alert_created_at": serialize_utc_datetime(alert.created_at) if alert else None,
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/incidents")
+def list_incidents(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    zone_id: int | None = None,
+    camera_id: int | None = None,
+    event_type: str | None = None,
+    search: str | None = Query(default=None, max_length=120),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = filtered_incident_query(
+        db,
+        start=start,
+        end=end,
+        zone_id=zone_id,
+        camera_id=camera_id,
+        event_type=event_type,
+        search=search,
+    )
+    total = query.count()
+    rows = (
+        query.order_by(DetectionEvent.created_at.desc(), DetectionEvent.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return {
+        "items": [incident_payload(event, camera, alert) for event, camera, alert in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/incidents/export.csv")
+def export_incidents_csv(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    zone_id: int | None = None,
+    camera_id: int | None = None,
+    event_type: str | None = None,
+    search: str | None = Query(default=None, max_length=120),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = filtered_incident_query(
+        db,
+        start=start,
+        end=end,
+        zone_id=zone_id,
+        camera_id=camera_id,
+        event_type=event_type,
+        search=search,
+    ).order_by(DetectionEvent.created_at.desc(), DetectionEvent.id.desc()).all()
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["Event ID", "Timestamp (UTC)", "Camera", "Zone", "Event type", "Details", "Alert status", "Frame"])
+    for event, camera, alert in rows:
+        writer.writerow(
+            [
+                event.id,
+                serialize_utc_datetime(event.created_at),
+                camera.name if camera else "Deleted camera",
+                event.zone_name,
+                event.event_type,
+                event.detail,
+                alert.status if alert else "",
+                event.frame_index,
+            ]
+        )
+    from fastapi.responses import Response
+
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="incident-history.csv"'},
+    )
 
 
 @app.get(f"{settings.api_v1_prefix}/events")

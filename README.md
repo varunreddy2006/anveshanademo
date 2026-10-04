@@ -65,6 +65,13 @@ cd backend
 - Administrators can seed and clear separate, visibly marked simulated chart history. Simulated records never contribute to actual risk scores or detection events.
 - Apply the `20261004_02` migration with `.\.venv\Scripts\python.exe -m alembic upgrade head` from `backend` before running against an existing database.
 
+## Phase 7 status
+
+- Incident History is backed by `/api/incidents` with date, zone, camera, event-type, and text search filters plus pagination. Selecting a row opens UTC-stamped (localized in the browser) incident detail and its evidence frame.
+- Export the complete filtered result set as CSV from `/api/incidents/export.csv`.
+- Reports uses `/api/reports/summary` for incident-type and zone counts and current zone risk; `/api/reports/pdf` generates day, week, or month PDFs with human-review and calculated-indicator notes. PDFs flag when simulated risk history exists.
+- Recharts powers the incident-by-type and incident-by-zone charts. ReportLab is required for PDF generation.
+
 Install the backend requirements to enable camera capture, MP4 processing, and YOLO:
 
 ```powershell

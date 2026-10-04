@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
+import { lazy, Suspense } from 'react'
 
 import { DashboardLayout } from './components/layout/DashboardLayout'
 import { LoginPage, RegisterPage } from './pages/AuthPage'
@@ -7,11 +8,12 @@ import { IncidentHistoryPage } from './pages/IncidentHistoryPage'
 import { LandingPage } from './pages/LandingPage'
 import { LiveMonitoringPage } from './pages/MonitoringPage'
 import { NotFoundPage } from './pages/NotFoundPage'
-import { ReportsPage } from './pages/ReportsPage'
 import { SafetyAlertsPage } from './pages/SafetyAlertsPage'
 import { CameraManagementPage } from './pages/CameraManagementPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ZoneRiskPage } from './pages/ZoneRiskPage'
+
+const ReportsPage = lazy(() => import('./pages/ReportsPage').then((module) => ({ default: module.ReportsPage })))
 
 function isAuthenticated() {
   return typeof window !== 'undefined' && Boolean(window.localStorage.getItem('safety_auth_token'))
@@ -43,7 +45,7 @@ function App() {
             <Route path="safety-alerts" element={<SafetyAlertsPage />} />
             <Route path="zone-risk" element={<ZoneRiskPage />} />
             <Route path="incidents" element={<IncidentHistoryPage />} />
-            <Route path="reports" element={<ReportsPage />} />
+            <Route path="reports" element={<Suspense fallback={<p className="p-6 text-sm text-slate-400">Loading reports…</p>}><ReportsPage /></Suspense>} />
             <Route path="cameras" element={<CameraManagementPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>

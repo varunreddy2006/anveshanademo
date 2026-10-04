@@ -110,6 +110,43 @@ export interface SafetyAlert extends DetectionEvent {
   severity: 'High' | 'Medium'
 }
 
+export interface Incident extends DetectionEvent {
+  alert_id: number | null
+  alert_status: string | null
+  alert_created_at: string | null
+}
+
+export interface IncidentPage {
+  items: Incident[]
+  page: number
+  page_size: number
+  total: number
+  pages: number
+}
+
+export interface ReportCount {
+  name: string
+  count: number
+}
+
+export interface ReportSummary {
+  start: string
+  end: string
+  total_incidents: number
+  by_type: ReportCount[]
+  by_zone: ReportCount[]
+  zone_risks: Array<{
+    zone_id: number
+    zone_name: string
+    score: number
+    trend: 'increasing' | 'stable' | 'decreasing'
+    velocity: number
+    projected_score: number
+    updated_at: string
+  }>
+  includes_simulated: boolean
+}
+
 export function formatLocalTimestamp(timestamp: string): string {
   return new Date(timestamp).toLocaleString()
 }
