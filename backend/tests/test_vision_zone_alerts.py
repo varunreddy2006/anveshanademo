@@ -48,30 +48,88 @@ def test_person_events_are_deduplicated_by_zone_person_and_entry() -> None:
 
     assert _emit_event(
         state, callback, "Restricted-zone entry", "Restricted", "Person 7 entered", b"evidence", 3,
-        person_id=7, zone_id=4, entered_zone=True, now=0,
+        person_id=7, zone_id=4, now=0,
     )
     assert not _emit_event(
         state, callback, "Restricted-zone entry", "Restricted", "Person 7 entered", b"evidence", 6,
-        person_id=7, zone_id=4, entered_zone=False, now=1,
-    )
-    assert _emit_event(
-        state, callback, "Restricted-zone entry", "Restricted", "Person 8 entered", b"evidence", 6,
-        person_id=8, zone_id=4, entered_zone=True, now=1,
-    )
-    assert _emit_event(
-        state, callback, "Restricted-zone entry", "Restricted", "Person 7 re-entered", b"evidence", 9,
-        person_id=7, zone_id=4, entered_zone=True, now=2,
+        person_id=7, zone_id=4, now=1,
     )
     assert not _emit_event(
-        state, callback, "Restricted-zone entry", "Restricted", "Person 7 remains inside", b"evidence", 12,
-        person_id=7, zone_id=4, entered_zone=False, now=31,
+        state, callback, "Restricted-zone entry", "Restricted", "Person 8 entered", b"evidence", 6,
+        person_id=8, zone_id=4, now=1,
+    )
+    assert not _emit_event(
+        state, callback, "Restricted-zone entry", "Restricted", "Person 7 re-entered", b"evidence", 9,
+        person_id=7, zone_id=4, now=2,
     )
     assert _emit_event(
-        state, callback, "Restricted-zone entry", "Restricted", "Person 7 cooldown elapsed", b"evidence", 15,
-        person_id=7, zone_id=4, entered_zone=False, now=32,
+        state, callback, "Restricted-zone entry", "Restricted", "Person 7 re-entered after cooldown", b"evidence", 12,
+        person_id=7, zone_id=4, now=30,
     )
-    assert len(events) == 4
+    assert not _emit_event(
+        state, callback, "Restricted-zone entry", "Restricted", "Person 8 before zone cooldown", b"evidence", 15,
+        person_id=8, zone_id=4, now=31,
+    )
+    assert _emit_event(
+        state, callback, "Restricted-zone entry", "Restricted", "Person 8 after zone cooldown", b"evidence", 18,
+        person_id=8, zone_id=4, now=60,
+    )
+    assert len(events) == 3
     assert all(event[3] == 4 for event in events)
+
+
+def test_restricted_entry_zone_cooldown_handles_flickering_and_missing_track_ids() -> None:
+    state = WorkerState(key="camera-1", camera_id=1, source_type="webcam")
+    emitted_at: list[float] = []
+    current_time = 0.0
+    callback = lambda *_args: emitted_at.append(current_time)
+    track_ids = [3, None, 31, 3, None, 31]
+    frame_times = [0, 2, 7, 11, 16, 29, 30, 34, 42, 59, 60, 67, 88, 90]
+
+    for frame_index, now in enumerate(frame_times):
+        current_time = now
+        _emit_event(
+            state,
+            callback,
+            "Restricted-zone entry",
+            "Restricted",
+            f"Flickering track {track_ids[frame_index % len(track_ids)]}",
+            b"evidence",
+            frame_index,
+            person_id=track_ids[frame_index % len(track_ids)],
+            zone_id=4,
+            now=now,
+        )
+
+    assert emitted_at == [0, 30, 60, 90]
+    assert all(later - earlier >= 30 for earlier, later in zip(emitted_at, emitted_at[1:]))
+    assert state.last_restricted_entry_at["4"] == 90
+
+
+def test_restricted_entry_cooldown_is_independent_between_zones() -> None:
+    state = WorkerState(key="camera-1", camera_id=1, source_type="webcam")
+    events: list[int | None] = []
+    callback = lambda _camera, _kind, _zone, _detail, _evidence, _frame, zone_id: events.append(zone_id)
+
+    assert _emit_event(state, callback, "Restricted-zone entry", "Zone A", "entry", b"evidence", 1, 3, 4, 0)
+    assert _emit_event(state, callback, "Restricted-zone entry", "Zone B", "entry", b"evidence", 2, 3, 5, 1)
+    assert events == [4, 5]
+
+
+def test_restricted_entry_retains_person_cooldown_after_zone_cooldown() -> None:
+    state = WorkerState(key="camera-1", camera_id=1, source_type="webcam")
+    state.last_restricted_entry_at["4"] = 0
+    state.last_event_at["Restricted-zone entry:4:3"] = 29
+    events: list[int | None] = []
+    callback = lambda _camera, _kind, _zone, _detail, _evidence, _frame, zone_id: events.append(zone_id)
+
+    assert not _emit_event(
+        state, callback, "Restricted-zone entry", "Zone A", "same person", b"evidence", 1, 3, 4, 30
+    )
+    assert _emit_event(
+        state, callback, "Restricted-zone entry", "Zone A", "different person", b"evidence", 2, 8, 4, 30
+    )
+    assert events == [4]
 
 
 def test_hazard_proximity_uses_person_and_zone_cooldown() -> None:

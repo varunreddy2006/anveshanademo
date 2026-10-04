@@ -27,6 +27,7 @@ class WorkerState:
     total_frames: int | None = None
     completed: bool = False
     last_event_at: dict[str, float] = field(default_factory=dict)
+    last_restricted_entry_at: dict[str, float] = field(default_factory=dict)
     last_crowding_event_at: dict[str, float] = field(default_factory=dict)
 
 
@@ -215,7 +216,6 @@ def _emit_event(
     frame_index: int,
     person_id: int | None = None,
     zone_id: int | None = None,
-    entered_zone: bool = False,
     now: float | None = None,
 ) -> bool:
     event_time = time.monotonic() if now is None else now
@@ -228,9 +228,13 @@ def _emit_event(
     else:
         event_key = f"{kind}:{zone_key}:{person_id}" if person_id is not None else f"{kind}:{zone_key}"
         previous = state.last_event_at.get(event_key)
-        is_reentry = kind == "Restricted-zone entry" and entered_zone
-        if not is_reentry and previous is not None and event_time - previous < 30:
+        if previous is not None and event_time - previous < 30:
             return False
+        if kind == "Restricted-zone entry":
+            zone_previous = state.last_restricted_entry_at.get(zone_key)
+            if zone_previous is not None and event_time - zone_previous < 30:
+                return False
+            state.last_restricted_entry_at[zone_key] = event_time
         state.last_event_at[event_key] = event_time
     event_callback(state.camera_id, kind, zone_name, detail, evidence, frame_index, zone_id)
     return True
@@ -282,7 +286,6 @@ def _run(
             state.total_frames = total or None
 
         frame_index = 0
-        previous_inside: set[tuple[int, int | str]] = set()
         while not state.stop_event.is_set():
             ok, frame = capture.read()
             if not ok:
@@ -331,8 +334,7 @@ def _run(
                 cv2.polylines(frame, [polygon], True, (59, 130, 246), 2)
                 cv2.putText(frame, zone["name"], points[0], cv2.FONT_HERSHEY_SIMPLEX, 0.55, (147, 197, 253), 2)
 
-            event_candidates: list[tuple[str, str, int, str, int | None, bool]] = []
-            current_inside: set[tuple[int, int | str]] = set()
+            event_candidates: list[tuple[str, str, int, str, int | None]] = []
             for zone in active_zones:
                 people_in_zone = 0
                 zone_id = int(zone["id"])
@@ -344,17 +346,14 @@ def _run(
                     inside = _inside_zone(center, zone, width, height)
                     if inside:
                         people_in_zone += 1
-                        current_inside.add((identity, zone_id))
                         if zone.get("zone_type", "normal") == "restricted":
-                            entered_zone = (identity, zone_id) not in previous_inside
                             event_candidates.append(
                                 (
                                     "Restricted-zone entry",
                                     zone["name"],
                                     zone_id,
                                     f"Person {identity} entered {zone['name']}",
-                                    identity,
-                                    entered_zone,
+                                    track_id,
                                 )
                             )
                     elif (
@@ -367,8 +366,7 @@ def _run(
                                 zone["name"],
                                 zone_id,
                                 f"Person {identity} detected near {zone['name']}",
-                                identity,
-                                False,
+                                track_id,
                             )
                         )
                 if people_in_zone > zone["crowd_threshold"]:
@@ -379,11 +377,8 @@ def _run(
                             zone_id,
                             f"{people_in_zone} people in {zone['name']} (threshold {zone['crowd_threshold']})",
                             None,
-                            False,
                         )
                     )
-            previous_inside = current_inside
-
             encoded_ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
             if encoded_ok:
                 evidence = encoded.tobytes()
@@ -391,7 +386,7 @@ def _run(
                     state.latest_frame = evidence
                     state.processed_frames = frame_index
                     state.progress = min(100, frame_index * 100 / max(total, 1)) if total else 0
-                for kind, zone_name, zone_id, detail, person_id, entered_zone in event_candidates:
+                for kind, zone_name, zone_id, detail, person_id in event_candidates:
                     _emit_event(
                         state,
                         event_callback,
@@ -402,7 +397,6 @@ def _run(
                         frame_index,
                         person_id=person_id,
                         zone_id=zone_id,
-                        entered_zone=entered_zone,
                     )
 
         with state.lock:

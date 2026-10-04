@@ -175,15 +175,19 @@ def test_only_admin_can_clear_camera_events_and_evidence(clear_events_client) ->
         connection.close()
 
 
-def test_admin_can_clear_all_real_detection_data_and_preserve_simulated_history(clear_events_client) -> None:
+@pytest.mark.parametrize("authorized_role", ["administrator", "safety_officer"])
+def test_authorized_role_can_clear_real_detection_data_and_preserve_simulated_history(
+    clear_events_client, authorized_role: str
+) -> None:
     client, state = clear_events_client
     evidence_dir = Path(state["evidence_dir"])
 
+    state["role"]["value"] = "unauthorized"
     forbidden = client.delete("/api/detection-data")
     assert forbidden.status_code == 403
     assert len(client.get("/api/events").json()) == 2
 
-    state["role"]["value"] = "administrator"
+    state["role"]["value"] = authorized_role
     response = client.delete("/api/detection-data")
     assert response.status_code == 200
     assert response.json() == {

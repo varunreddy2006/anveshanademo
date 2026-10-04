@@ -1459,7 +1459,9 @@ def clear_camera_detection_data(
 
 @app.delete(f"{settings.api_v1_prefix}/detection-data")
 def clear_all_detection_data(
-    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    current_user: User = Depends(
+        require_roles([UserRole.ADMINISTRATOR.value, UserRole.SAFETY_OFFICER.value])
+    ),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
     with vision_event_store_lock:

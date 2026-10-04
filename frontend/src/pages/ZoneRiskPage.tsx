@@ -23,6 +23,20 @@ function isAdministrator() {
   }
 }
 
+function canClearDetectionData() {
+  try {
+    const user: unknown = JSON.parse(window.localStorage.getItem('safety_user') ?? 'null')
+    return (
+      typeof user === 'object' &&
+      user !== null &&
+      'role' in user &&
+      (user.role === 'administrator' || user.role === 'safety_officer')
+    )
+  } catch {
+    return false
+  }
+}
+
 function chartPath(points: RiskHistoryPoint[], current: ZoneRisk, simulated: boolean) {
   const chartValues = points.filter((point) => point.is_simulated === simulated)
   if (simulated && chartValues.length === 0) return ''
@@ -309,6 +323,7 @@ export function ZoneRiskPage() {
   const [detectionResetBusy, setDetectionResetBusy] = useState(false)
   const [resetNotice, setResetNotice] = useState('')
   const [isAdmin] = useState(isAdministrator)
+  const [canClearDetection] = useState(canClearDetectionData)
   const [saving, setSaving] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
   const [editingZone, setEditingZone] = useState<Zone | null>(null)
@@ -588,16 +603,18 @@ export function ZoneRiskPage() {
               >
                 Clear simulated history
               </button>
-              <button
-                type="button"
-                onClick={() => void clearAllDetectionData()}
-                disabled={detectionResetBusy}
-                className="inline-flex items-center gap-2 rounded-xl border border-red-500/40 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50"
-              >
-                <Trash2 className="h-4 w-4" />
-                {detectionResetBusy ? 'Clearing…' : 'Clear all detection data'}
-              </button>
             </div>
+          ) : null}
+          {canClearDetection ? (
+            <button
+              type="button"
+              onClick={() => void clearAllDetectionData()}
+              disabled={detectionResetBusy}
+              className="inline-flex items-center gap-2 rounded-xl border border-red-500/40 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              {detectionResetBusy ? 'Clearing…' : 'Clear detection events and risk history'}
+            </button>
           ) : null}
         </div>
         <p className="text-xs text-slate-500">
