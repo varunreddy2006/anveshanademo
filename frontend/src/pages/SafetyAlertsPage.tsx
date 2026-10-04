@@ -11,6 +11,15 @@ const alertStatuses: SafetyAlert['status'][] = [
   'Resolved',
   'False Positive',
 ]
+const detectionEventTypes = [
+  'Restricted-zone entry',
+  'Hazard-zone proximity',
+  'Crowding threshold',
+  'Missing helmet',
+  'Missing vest',
+  'Smoke detected',
+  'Fire detected',
+]
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unable to complete the alert request.'
@@ -48,6 +57,7 @@ export function SafetyAlertsPage() {
   const [saving, setSaving] = useState(false)
   const [canManage] = useState(canManageAlerts)
   const [severityFilter, setSeverityFilter] = useState('')
+  const [eventTypeFilter, setEventTypeFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [zoneFilter, setZoneFilter] = useState('')
   const [cameraFilter, setCameraFilter] = useState('')
@@ -107,12 +117,13 @@ export function SafetyAlertsPage() {
 
   const filteredAlerts = useMemo(() => alerts.filter((alert) => (
     (!severityFilter || alert.severity === severityFilter) &&
+    (!eventTypeFilter || alert.event_type === eventTypeFilter) &&
     (!statusFilter || alert.status === statusFilter) &&
     (!zoneFilter || String(alert.zone_id ?? '') === zoneFilter) &&
     (!cameraFilter || String(alert.camera_id ?? '') === cameraFilter) &&
     (!dateFrom || localDate(alert.created_at) >= dateFrom) &&
     (!dateTo || localDate(alert.created_at) <= dateTo)
-  )), [alerts, cameraFilter, dateFrom, dateTo, severityFilter, statusFilter, zoneFilter])
+  )), [alerts, cameraFilter, dateFrom, dateTo, eventTypeFilter, severityFilter, statusFilter, zoneFilter])
 
   async function changeAlert(alert: SafetyAlert, changes: { status?: SafetyAlert['status']; assigned_user_id?: number | null }) {
     setSaving(true)
@@ -164,12 +175,17 @@ export function SafetyAlertsPage() {
       <section aria-label="Alert filters" className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-950 p-4 sm:grid-cols-2 lg:grid-cols-3">
         <label className="text-xs text-slate-400">Severity
           <select className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white" value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)}>
-            <option value="">All severities</option><option>High</option><option>Medium</option>
+            <option value="">All severities</option><option>Critical</option><option>High</option><option>Medium</option>
           </select>
         </label>
         <label className="text-xs text-slate-400">Status
           <select className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
             <option value="">All statuses</option>{alertStatuses.map((status) => <option key={status}>{status}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-slate-400">Event type
+          <select className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white" value={eventTypeFilter} onChange={(event) => setEventTypeFilter(event.target.value)}>
+            <option value="">All event types</option>{detectionEventTypes.map((eventType) => <option key={eventType}>{eventType}</option>)}
           </select>
         </label>
         <label className="text-xs text-slate-400">Zone
@@ -204,7 +220,7 @@ export function SafetyAlertsPage() {
                 </td>
                 <td className="px-4 py-3"><span className="text-white">{alert.camera_name}</span><span className="mt-1 block text-xs text-slate-500">{alert.zone_name}</span></td>
                 <td className="px-4 py-3">{alert.event_type}</td>
-                <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${alert.severity === 'High' ? 'bg-orange-500/15 text-orange-300' : 'bg-yellow-500/15 text-yellow-200'}`}>{alert.severity}</span></td>
+                <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${alert.severity === 'Critical' ? 'bg-red-500/15 text-red-300' : alert.severity === 'High' ? 'bg-orange-500/15 text-orange-300' : 'bg-yellow-500/15 text-yellow-200'}`}>{alert.severity}</span></td>
                 <td className="px-4 py-3">
                   {canManage ? (
                     <select aria-label={`Status for alert ${alert.alert_id}`} className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white" value={alert.status} disabled={saving} onChange={(event) => void changeAlert(alert, { status: event.target.value as SafetyAlert['status'] })}>

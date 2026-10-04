@@ -174,6 +174,10 @@ def test_risk_configuration_endpoint_exposes_configured_weights_and_bands(risk_c
         "restricted_entry": 15,
         "hazard_proximity": 12,
         "crowding": 8,
+        "missing_helmet": 10,
+        "missing_vest": 10,
+        "smoke": 35,
+        "fire": 60,
     }
     assert config.json()["decay_half_life_minutes"] == 30
     assert config.json()["bands"] == {"low_max": 33, "guarded_max": 55, "elevated_max": 75}

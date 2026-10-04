@@ -8,6 +8,10 @@ EVENT_WEIGHTS = {
     "Restricted-zone entry": 15.0,
     "Hazard-zone proximity": 12.0,
     "Crowding threshold": 8.0,
+    "Missing helmet": 10.0,
+    "Missing vest": 10.0,
+    "Smoke detected": 35.0,
+    "Fire detected": 60.0,
 }
 
 
@@ -16,12 +20,20 @@ class RiskWeights:
     restricted_entry: float = EVENT_WEIGHTS["Restricted-zone entry"]
     hazard_proximity: float = EVENT_WEIGHTS["Hazard-zone proximity"]
     crowding: float = EVENT_WEIGHTS["Crowding threshold"]
+    missing_helmet: float = EVENT_WEIGHTS["Missing helmet"]
+    missing_vest: float = EVENT_WEIGHTS["Missing vest"]
+    smoke: float = EVENT_WEIGHTS["Smoke detected"]
+    fire: float = EVENT_WEIGHTS["Fire detected"]
 
     def for_event(self, event_type: str) -> float:
         return {
             "Restricted-zone entry": self.restricted_entry,
             "Hazard-zone proximity": self.hazard_proximity,
             "Crowding threshold": self.crowding,
+            "Missing helmet": self.missing_helmet,
+            "Missing vest": self.missing_vest,
+            "Smoke detected": self.smoke,
+            "Fire detected": self.fire,
         }.get(event_type, 0.0)
 
 
@@ -103,6 +115,10 @@ def risk_explanation(
         "Restricted-zone entry": ("restricted-zone entry", "restricted-zone entries"),
         "Hazard-zone proximity": ("hazard-proximity event", "hazard-proximity events"),
         "Crowding threshold": ("crowding event", "crowding events"),
+        "Missing helmet": ("missing-helmet event", "missing-helmet events"),
+        "Missing vest": ("missing-vest event", "missing-vest events"),
+        "Smoke detected": ("smoke detection", "smoke detections"),
+        "Fire detected": ("fire detection", "fire detections"),
     }
     for event in recent_events:
         event_type = event.get("event_type")

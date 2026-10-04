@@ -92,6 +92,10 @@ export interface RiskScoringConfig {
     restricted_entry: number
     hazard_proximity: number
     crowding: number
+    missing_helmet: number
+    missing_vest: number
+    smoke: number
+    fire: number
   }
   decay_half_life_minutes: number
   rapid_escalation_velocity: number
@@ -155,7 +159,7 @@ export interface DetectionEvent {
 export interface SafetyAlert extends DetectionEvent {
   alert_id: number
   status: 'New' | 'Acknowledged' | 'Under Investigation' | 'Resolved' | 'False Positive'
-  severity: 'High' | 'Medium'
+  severity: 'Critical' | 'High' | 'Medium'
   zone_id: number | null
   assigned_user_id: number | null
   assigned_user_name: string | null

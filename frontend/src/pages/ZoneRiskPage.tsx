@@ -700,6 +700,10 @@ export function ZoneRiskPage() {
                 <p>Restricted-zone entry weight: <strong>{riskConfig.weights.restricted_entry}</strong></p>
                 <p>Hazard proximity weight: <strong>{riskConfig.weights.hazard_proximity}</strong></p>
                 <p>Crowding weight: <strong>{riskConfig.weights.crowding}</strong></p>
+                <p>Missing helmet weight: <strong>{riskConfig.weights.missing_helmet}</strong></p>
+                <p>Missing vest weight: <strong>{riskConfig.weights.missing_vest}</strong></p>
+                <p>Smoke weight: <strong>{riskConfig.weights.smoke}</strong></p>
+                <p>Fire weight: <strong>{riskConfig.weights.fire}</strong></p>
                 <p>Decay half-life: <strong>{riskConfig.decay_half_life_minutes} minutes</strong></p>
                 <p>Trend window: <strong>{riskConfig.trend_window_minutes} minutes</strong></p>
                 <p>Rapid escalation: <strong>{riskConfig.rapid_escalation_velocity} points/minute</strong></p>

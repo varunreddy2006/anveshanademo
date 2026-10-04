@@ -110,6 +110,7 @@ def alert_client(tmp_path) -> Generator[tuple[TestClient, dict[str, int | str]],
                 "viewer_id": viewer_id,
                 "zone_id": zone_id,
                 "camera_id": camera_id,
+                "database_path": str(database_path),
                 "current_user": current_user,
             }
     finally:
@@ -200,3 +201,40 @@ def test_alert_role_permissions_validation_and_filters(alert_client) -> None:
         "administrator",
         "safety_officer",
     }
+
+
+def test_alert_severity_filters_include_ppe_smoke_and_fire(alert_client) -> None:
+    client, state = alert_client
+    engine = create_engine(f"sqlite:///{state['database_path']}")
+    test_session = sessionmaker(bind=engine)
+    with test_session() as db:
+        for event_type in ("Missing helmet", "Smoke detected", "Fire detected"):
+            event = DetectionEvent(
+                camera_id=state["camera_id"],
+                zone_id=state["zone_id"],
+                event_type=event_type,
+                zone_name="Restricted floor",
+                detail=f"Mock {event_type}",
+                evidence_filename="mock.jpg",
+                frame_index=20,
+            )
+            db.add(event)
+            db.flush()
+            db.add(SafetyAlert(event_id=event.id))
+        db.commit()
+    engine.dispose()
+
+    critical = client.get("/api/alerts", params={"severity": "Critical"})
+    high = client.get("/api/alerts", params={"severity": "High"})
+    medium = client.get("/api/alerts", params={"severity": "Medium"})
+    fire = client.get("/api/alerts", params={"event_type": "Fire detected"})
+    invalid_event_type = client.get("/api/alerts", params={"event_type": "Unrecognized event"})
+    assert critical.status_code == high.status_code == medium.status_code == 200
+    assert [alert["event_type"] for alert in critical.json()] == ["Fire detected"]
+    assert {alert["event_type"] for alert in high.json()} == {
+        "Restricted-zone entry",
+        "Smoke detected",
+    }
+    assert [alert["event_type"] for alert in medium.json()] == ["Missing helmet"]
+    assert [alert["event_type"] for alert in fire.json()] == ["Fire detected"]
+    assert invalid_event_type.status_code == 422

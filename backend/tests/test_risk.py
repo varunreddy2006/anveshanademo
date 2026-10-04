@@ -45,3 +45,19 @@ def test_regression_velocity_trend_and_five_minute_projection() -> None:
 def test_risk_score_rejects_invalid_half_life() -> None:
     with pytest.raises(ValueError, match="half-life"):
         score_events([], datetime.now(timezone.utc), half_life_minutes=0)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected_score"),
+    [
+        ("Missing helmet", 10),
+        ("Missing vest", 10),
+        ("Smoke detected", 35),
+        ("Fire detected", 60),
+    ],
+)
+def test_ppe_and_fire_smoke_events_use_configured_default_risk_weights(
+    event_type: str, expected_score: int
+) -> None:
+    now = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+    assert score_events([{"event_type": event_type, "created_at": now}], now) == expected_score

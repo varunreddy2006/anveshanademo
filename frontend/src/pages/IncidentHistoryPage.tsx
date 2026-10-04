@@ -3,7 +3,15 @@ import { useEffect, useState } from 'react'
 import { apiBlob, apiRequest, formatLocalTimestamp, type Camera, type Incident, type IncidentPage, type Zone } from '../lib/api'
 
 const inputClass = 'rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white'
-const eventTypes = ['Restricted-zone entry', 'Hazard-zone proximity', 'Crowding threshold']
+const eventTypes = [
+  'Restricted-zone entry',
+  'Hazard-zone proximity',
+  'Crowding threshold',
+  'Missing helmet',
+  'Missing vest',
+  'Smoke detected',
+  'Fire detected',
+]
 
 function localDateBoundary(value: string, addDay = false): string | undefined {
   if (!value) return undefined

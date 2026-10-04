@@ -10,6 +10,7 @@ The project is intended to demonstrate a practical monitoring workflow—not to 
 - **Camera and video input:** Start a laptop webcam (device 0) or configured RTSP/HTTP(S) stream. Upload an MP4 to test analysis; uploaded video is identified as a test input, not a live camera.
 - **Configurable zones:** Create normalized rectangular or polygon zones and set confidence and crowd thresholds. Rectangles can be drawn on a preview frame.
 - **Zone events:** Restricted zones produce entry events, hazard/machinery zones produce proximity events, and any zone with a crowd threshold can produce a crowding event. A 30-second cooldown limits repeated events.
+- **PPE and fire/smoke detection:** When `models\ppe.pt` and `models\fire_smoke.pt` exist, their detectors run on the same sampled CPU frames as tracking. PPE findings are matched to person head/torso regions; smoke/fire and missing-PPE findings require consecutive detections before an event is recorded. Edit class-ID mappings in `config\model_classes.json`. Model availability is shown on Live Monitoring.
 - **Safety Alerts:** Browse and filter alert records by severity, status, zone, camera, and date. Safety Officers and Administrators can acknowledge, investigate, resolve, or mark false positives; assign alerts; and add investigation notes. Status changes, assignments, and notes are recorded in the audit log. The queue polls every five seconds and shows a new-alert badge.
 - **Zone Risk:** Calculates a 0–100 score per zone from real stored events, applies exponential time decay, and reports trend, velocity, a five-minute projection, and a plain-English explanation. Cards summarize event categories for the selected period, recommend actions for the most frequent category, and show a repeated-risk badge for three or more events. Choose Last hour, Today, or 7 days to filter the charts and compare the period score with its preceding period.
 - **Risk configuration:** The Zone Risk page has a collapsible explanation showing configured event weights, decay half-life, and score-band thresholds.
@@ -102,7 +103,7 @@ npm run dev
 
 Open the Vite URL shown in the frontend terminal (normally `http://localhost:5173`). The Vite development server proxies `/api` requests to the backend on port 8000. The webcam and video processing run on the machine hosting the backend.
 
-The pretrained model is loaded from `models\yolov8n.pt` when that file exists; otherwise Ultralytics is asked to resolve `yolov8n.pt` and may download it. PPE and fire/smoke adapters are separate and require their own trained weights; see [Limitations](#limitations).
+The pretrained COCO person model is loaded from `models\yolov8n.pt` when that file exists; otherwise Ultralytics is asked to resolve `yolov8n.pt` and may download it. PPE and fire/smoke models are optional; place `ppe.pt` and `fire_smoke.pt` in `models` to enable them.
 
 To run the backend tests:
 
@@ -143,16 +144,23 @@ Configure these backend environment variables (prefix settings with `RISK_`):
 | `RISK_WEIGHT_RESTRICTED_ENTRY` | `15` | Contribution for a restricted-zone entry |
 | `RISK_WEIGHT_HAZARD_PROXIMITY` | `12` | Contribution for hazard-zone proximity |
 | `RISK_WEIGHT_CROWDING` | `8` | Contribution for a crowding event |
+| `RISK_WEIGHT_MISSING_HELMET` | `10` | Contribution for a missing-hardhat event |
+| `RISK_WEIGHT_MISSING_VEST` | `10` | Contribution for a missing-safety-vest event |
+| `RISK_WEIGHT_SMOKE` | `35` | Contribution for a smoke detection |
+| `RISK_WEIGHT_FIRE` | `60` | Contribution for a fire detection |
 | `RISK_DECAY_HALF_LIFE_MINUTES` | `30` | Exponential decay half-life; must be greater than zero |
 | `RISK_RAPID_ESCALATION_VELOCITY` | `8` | Points per minute at or above which rapid escalation is shown |
 | `RISK_BAND_LOW_MAX` | `33` | Maximum score in the green/low band |
 | `RISK_BAND_GUARDED_MAX` | `55` | Maximum score in the yellow/guarded band |
 | `RISK_BAND_ELEVATED_MAX` | `75` | Maximum score in the orange/elevated band |
 
+Vision confirmation and fire/smoke confidence can be tuned with `VISION_CONFIRMATION_FRAMES` (default `3`) and `FIRE_SMOKE_CONFIDENCE_THRESHOLD` (default `0.5`, range 0–1). The supplemental models run only on the person tracker’s sampled frames.
+
 ## Limitations
 
-- **PPE and fire/smoke are not currently detected.** The UI reports `AI model unavailable` unless corresponding trained weights are placed in the repository `models` directory (PPE weights named `ppe*.pt`; fire/smoke weights named `fire*.pt` or `smoke*.pt`). The adapters do not train or provide those models.
-- **CPU analysis is slow.** It samples every third frame and may fall behind on long or high-resolution videos. No GPU acceleration is configured by this application.
+- **PPE and fire/smoke model quality depends on supplied weights.** The application supports `models\ppe.pt` and `models\fire_smoke.pt`; it does not train, certify, or validate them. PPE findings are ignored unless their boxes overlap the tracked person's head/torso, and missing-hardhat detections are ignored when no hardhat is found anywhere in that frame. Consecutive-frame confirmation and cooldowns reduce repeated alerts but do not eliminate false positives or false negatives.
+- **CPU analysis is slow.** All three models run on CPU and inference is sampled every third frame; processing may fall behind on long or high-resolution videos. No GPU acceleration is configured by this application.
+- **Fire/smoke confidence defaults to `0.5` and confirmation defaults to three sampled frames.** Adjust `FIRE_SMOKE_CONFIDENCE_THRESHOLD` and `VISION_CONFIRMATION_FRAMES` for the environment; tuning does not substitute for model validation.
 - **Risk scores and warnings are calculated indicators, not validated predictions.** They are not a certified safety assessment and must not be used as the sole basis for operational decisions.
 - **Simulated history is not real.** Seeded records are visibly labeled `SIMULATED`, stored separately from detections, and excluded from the calculated real risk score.
 - **The alert workflow is intentionally trimmed.** Status changes, assignment, investigation notes, and audit logging are implemented, but escalation rules and external notifications are not.
@@ -169,7 +177,7 @@ This software is a prototype for demonstration and evaluation. It can miss hazar
 
 ## Future improvements
 
-- Integrate and validate trained PPE and fire/smoke models.
+- Validate PPE and fire/smoke models and thresholds against representative site data.
 - Add alert escalation rules and external notifications.
 - Improve performance with configurable sampling, optimized inference, and optional GPU support.
 - Add deployment hardening, retention controls, and operational monitoring.

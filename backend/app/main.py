@@ -705,6 +705,10 @@ def configured_risk_weights() -> RiskWeights:
         restricted_entry=settings.risk_weight_restricted_entry,
         hazard_proximity=settings.risk_weight_hazard_proximity,
         crowding=settings.risk_weight_crowding,
+        missing_helmet=settings.risk_weight_missing_helmet,
+        missing_vest=settings.risk_weight_missing_vest,
+        smoke=settings.risk_weight_smoke,
+        fire=settings.risk_weight_fire,
     )
 
 
@@ -822,6 +826,10 @@ def zone_period_analytics(
         "Restricted-zone entry": "Review access controls and reinforce restricted-zone procedures.",
         "Hazard-zone proximity": "Inspect machinery guarding and verify the hazard exclusion distance.",
         "Crowding threshold": "Review occupancy limits and consider staggering personnel in this zone.",
+        "Missing helmet": "Pause work and provide or verify required hardhat PPE.",
+        "Missing vest": "Pause work and provide or verify required safety vest PPE.",
+        "Smoke detected": "Investigate the smoke source and follow the site's emergency response procedure.",
+        "Fire detected": "Activate the site's fire response procedure and contact emergency responders.",
     }
     categories = [
         {"event_type": event_type, "count": count}
@@ -937,6 +945,10 @@ def get_risk_config(current_user: User = Depends(get_current_user)) -> dict[str,
             "restricted_entry": weights.restricted_entry,
             "hazard_proximity": weights.hazard_proximity,
             "crowding": weights.crowding,
+            "missing_helmet": weights.missing_helmet,
+            "missing_vest": weights.missing_vest,
+            "smoke": weights.smoke,
+            "fire": weights.fire,
         },
         "decay_half_life_minutes": settings.risk_decay_half_life_minutes,
         "rapid_escalation_velocity": settings.risk_rapid_escalation_velocity,
@@ -1701,6 +1713,16 @@ def get_event_evidence(
     return FileResponse(evidence_path, media_type="image/jpeg")
 
 
+def event_severity(event_type: str) -> str:
+    return {
+        "Restricted-zone entry": "High",
+        "Missing helmet": "Medium",
+        "Missing vest": "Medium",
+        "Smoke detected": "High",
+        "Fire detected": "Critical",
+    }.get(event_type, "Medium")
+
+
 def safety_alert_payload(db: Session, alert: SafetyAlert, event: DetectionEvent) -> dict[str, Any]:
     assignee = db.query(User).filter(User.id == alert.assigned_user_id).first() if alert.assigned_user_id else None
     return {
@@ -1710,7 +1732,7 @@ def safety_alert_payload(db: Session, alert: SafetyAlert, event: DetectionEvent)
         ),
         "alert_id": alert.id,
         "status": alert.status,
-        "severity": "High" if event.event_type == "Restricted-zone entry" else "Medium",
+        "severity": event_severity(event.event_type),
         "created_at": serialize_utc_datetime(alert.created_at),
         "assigned_user_id": alert.assigned_user_id,
         "assigned_user_name": assignee.full_name if assignee else None,
@@ -1748,7 +1770,11 @@ def list_assignable_users(
 
 @app.get(f"{settings.api_v1_prefix}/alerts")
 def list_safety_alerts(
-    severity: str | None = Query(default=None, regex="^(High|Medium)$"),
+    severity: str | None = Query(default=None, regex="^(High|Medium|Critical)$"),
+    event_type: str | None = Query(
+        default=None,
+        regex="^(Restricted-zone entry|Hazard-zone proximity|Crowding threshold|Missing helmet|Missing vest|Smoke detected|Fire detected)$",
+    ),
     alert_status: str | None = Query(
         default=None,
         alias="status",
@@ -1766,10 +1792,23 @@ def list_safety_alerts(
     )
     if alert_status:
         query = query.filter(SafetyAlert.status == alert_status)
-    if severity == "High":
-        query = query.filter(DetectionEvent.event_type == "Restricted-zone entry")
-    elif severity == "Medium":
-        query = query.filter(DetectionEvent.event_type != "Restricted-zone entry")
+    if event_type is not None:
+        query = query.filter(DetectionEvent.event_type == event_type)
+    if severity is not None:
+        event_types = [
+            event_type
+            for event_type in (
+                "Restricted-zone entry",
+                "Hazard-zone proximity",
+                "Crowding threshold",
+                "Missing helmet",
+                "Missing vest",
+                "Smoke detected",
+                "Fire detected",
+            )
+            if event_severity(event_type) == severity
+        ]
+        query = query.filter(DetectionEvent.event_type.in_(event_types))
     if zone_id is not None:
         query = query.filter(DetectionEvent.zone_id == zone_id)
     if camera_id is not None:
