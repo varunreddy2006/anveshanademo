@@ -56,6 +56,30 @@ export interface ZoneInput {
   confidence_threshold: number
 }
 
+export interface RiskHistoryPoint {
+  score: number
+  trend: 'increasing' | 'stable' | 'decreasing'
+  velocity: number
+  projected_score: number
+  explanation: string
+  is_simulated: boolean
+  recorded_at: string
+}
+
+export interface ZoneRisk {
+  zone_id: number
+  zone_name: string
+  zone_type: ZoneType
+  score: number
+  trend: 'increasing' | 'stable' | 'decreasing'
+  velocity: number
+  rapid_escalation: boolean
+  projected_score: number
+  explanation: string
+  updated_at: string
+  history: RiskHistoryPoint[]
+}
+
 export interface CameraVisionStatus {
   key?: string
   camera_id: number

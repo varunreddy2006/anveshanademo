@@ -56,6 +56,15 @@ cd backend
 - PPE and fire/smoke model adapters report `AI model unavailable` until matching `.pt` weights are placed in the repository `models` directory. YOLOv8n weights can be placed there as `yolov8n.pt`; otherwise Ultralytics resolves its pretrained `yolov8n.pt` model.
 - Persisted datetimes are normalized as UTC, including legacy naive SQLite timestamps. Events, alerts, and the administrator-only `/api/audit-logs` endpoint serialize timestamps as ISO 8601 with a `Z` suffix; timestamp displays use the browser's local timezone.
 
+## Phase 6 status
+
+- Zone Risk calculates a bounded 0–100 score per configured zone from stored deduplicated restricted-entry, hazard-proximity, and crowding events. Contributions decay exponentially with a 30-minute default half-life.
+- Risk history is stored every five seconds while detections run and during non-zero risk decay. The recent stored-score regression supplies trend, points-per-minute velocity, and a five-minute calculated projection.
+- Risk weights are configurable with `RISK_WEIGHT_RESTRICTED_ENTRY` (15), `RISK_WEIGHT_HAZARD_PROXIMITY` (12), `RISK_WEIGHT_CROWDING` (8), and `RISK_DECAY_HALF_LIFE_MINUTES` (30). `RISK_RAPID_ESCALATION_VELOCITY` (8 points/minute) controls the rapid-escalation indicator.
+- Risk timestamps are stored/serialized in UTC and shown in local browser time. Risk values are calculated indicators, not validated predictions.
+- Administrators can seed and clear separate, visibly marked simulated chart history. Simulated records never contribute to actual risk scores or detection events.
+- Apply the `20261004_02` migration with `.\.venv\Scripts\python.exe -m alembic upgrade head` from `backend` before running against an existing database.
+
 Install the backend requirements to enable camera capture, MP4 processing, and YOLO:
 
 ```powershell

@@ -41,8 +41,10 @@ def test_zone_types_route_entry_proximity_and_crowding_alerts(
 
 def test_person_events_are_deduplicated_by_zone_person_and_entry() -> None:
     state = WorkerState(key="camera-1", camera_id=1, source_type="webcam")
-    events: list[tuple[str, str, str]] = []
-    callback = lambda _camera_id, kind, zone, detail, _evidence, _frame: events.append((kind, zone, detail))
+    events: list[tuple[str, str, str, int | None]] = []
+    callback = lambda _camera_id, kind, zone, detail, _evidence, _frame, zone_id: events.append(
+        (kind, zone, detail, zone_id)
+    )
 
     assert _emit_event(
         state, callback, "Restricted-zone entry", "Restricted", "Person 7 entered", b"evidence", 3,
@@ -69,6 +71,7 @@ def test_person_events_are_deduplicated_by_zone_person_and_entry() -> None:
         person_id=7, zone_id=4, entered_zone=False, now=32,
     )
     assert len(events) == 4
+    assert all(event[3] == 4 for event in events)
 
 
 def test_hazard_proximity_uses_person_and_zone_cooldown() -> None:

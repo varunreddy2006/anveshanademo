@@ -13,6 +13,7 @@ from app.main import (
     Base,
     Camera,
     DetectionEvent,
+    RiskScoreHistory,
     SafetyAlert,
     User,
     Zone,
@@ -64,8 +65,7 @@ def clear_events_client(tmp_path, monkeypatch) -> Generator[tuple[TestClient, Cl
         ]
         db.add_all(cameras)
         db.flush()
-        db.add(
-            Zone(
+        zone = Zone(
                 name="Keep this zone",
                 camera_id=cameras[0].id,
                 zone_type="normal",
@@ -74,7 +74,7 @@ def clear_events_client(tmp_path, monkeypatch) -> Generator[tuple[TestClient, Cl
                 crowd_threshold=10,
                 confidence_threshold=0.5,
             )
-        )
+        db.add(zone)
         db.add(
             User(
                 full_name="Persisted user",
@@ -88,6 +88,7 @@ def clear_events_client(tmp_path, monkeypatch) -> Generator[tuple[TestClient, Cl
             (evidence_dir / evidence_filename).write_bytes(b"test evidence")
             event = DetectionEvent(
                 camera_id=camera.id,
+                zone_id=zone.id if camera.id == cameras[0].id else None,
                 event_type="Restricted-zone entry",
                 zone_name=f"Zone {camera.id}",
                 detail="Test event",
@@ -97,6 +98,28 @@ def clear_events_client(tmp_path, monkeypatch) -> Generator[tuple[TestClient, Cl
             db.add(event)
             db.flush()
             db.add(SafetyAlert(event_id=event.id))
+        db.add_all(
+            [
+                RiskScoreHistory(
+                    zone_id=zone.id,
+                    score=25,
+                    trend="increasing",
+                    velocity=2.0,
+                    projected_score=35,
+                    explanation="Real risk history",
+                    is_simulated=False,
+                ),
+                RiskScoreHistory(
+                    zone_id=zone.id,
+                    score=40,
+                    trend="stable",
+                    velocity=0.0,
+                    projected_score=40,
+                    explanation="SIMULATED history",
+                    is_simulated=True,
+                ),
+            ]
+        )
         db.commit()
         camera_id = cameras[0].id
         other_camera_id = cameras[1].id
@@ -148,5 +171,48 @@ def test_only_admin_can_clear_camera_events_and_evidence(clear_events_client) ->
     connection = sqlite3.connect(state["database_path"])
     try:
         assert connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_admin_can_clear_all_real_detection_data_and_preserve_simulated_history(clear_events_client) -> None:
+    client, state = clear_events_client
+    evidence_dir = Path(state["evidence_dir"])
+
+    forbidden = client.delete("/api/detection-data")
+    assert forbidden.status_code == 403
+    assert len(client.get("/api/events").json()) == 2
+
+    state["role"]["value"] = "administrator"
+    response = client.delete("/api/detection-data")
+    assert response.status_code == 200
+    assert response.json() == {
+        "events_deleted": 2,
+        "alerts_deleted": 2,
+        "evidence_deleted": 2,
+        "risk_history_deleted": 1,
+    }
+    assert client.get("/api/events").json() == []
+    assert client.get("/api/alerts").json() == []
+    assert all(
+        risk["history"] and all(point["is_simulated"] for point in risk["history"])
+        for risk in client.get("/api/risk/zones").json()
+    )
+    assert not (evidence_dir / "event-1.jpg").exists()
+    assert not (evidence_dir / "event-2.jpg").exists()
+
+    connection = sqlite3.connect(state["database_path"])
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM cameras").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM zones").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM detection_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM safety_alerts").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM risk_score_history WHERE is_simulated = 0"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM risk_score_history WHERE is_simulated = 1"
+        ).fetchone()[0] == 1
     finally:
         connection.close()

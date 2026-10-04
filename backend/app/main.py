@@ -1,7 +1,8 @@
 import hashlib
+import logging
 import secrets
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Generator
@@ -11,12 +12,13 @@ from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, root_validator, validator
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, JSON, String, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
 from app.core.config import settings
 from app import vision
+from app.risk import RiskWeights, project_score, regression_slope, risk_explanation, risk_trend, score_events
 
 Base = declarative_base()
 
@@ -125,12 +127,27 @@ class DetectionEvent(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     camera_id = Column(Integer, ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True)
+    zone_id = Column(Integer, ForeignKey("zones.id", ondelete="SET NULL"), nullable=True)
     event_type = Column(String(80), nullable=False)
     zone_name = Column(String(120), nullable=False)
     detail = Column(String(500), nullable=False)
     evidence_filename = Column(String(255), nullable=False)
     frame_index = Column(Integer, nullable=False)
     created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class RiskScoreHistory(Base):
+    __tablename__ = "risk_score_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    zone_id = Column(Integer, ForeignKey("zones.id", ondelete="CASCADE"), nullable=False, index=True)
+    score = Column(Integer, nullable=False)
+    trend = Column(String(20), nullable=False)
+    velocity = Column(Float, nullable=False)
+    projected_score = Column(Integer, nullable=False)
+    explanation = Column(String(500), nullable=False)
+    is_simulated = Column(Boolean, nullable=False, default=False, server_default="0")
+    recorded_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
 
 class SafetyAlert(Base):
@@ -619,6 +636,7 @@ def persist_vision_event(
     detail: str,
     evidence: bytes,
     frame_index: int,
+    zone_id: int | None = None,
 ) -> None:
     with vision_event_store_lock:
         db = SessionLocal()
@@ -626,6 +644,7 @@ def persist_vision_event(
         try:
             event = DetectionEvent(
                 camera_id=camera_id,
+                zone_id=zone_id,
                 event_type=event_type,
                 zone_name=zone_name,
                 detail=detail,
@@ -642,6 +661,257 @@ def persist_vision_event(
             raise
         finally:
             db.close()
+
+
+def configured_risk_weights() -> RiskWeights:
+    return RiskWeights(
+        restricted_entry=settings.risk_weight_restricted_entry,
+        hazard_proximity=settings.risk_weight_hazard_proximity,
+        crowding=settings.risk_weight_crowding,
+    )
+
+
+def zone_detection_events(db: Session, zone: Zone, all_zones: list[Zone]) -> list[DetectionEvent]:
+    matching_legacy_zones = [
+        candidate
+        for candidate in all_zones
+        if candidate.name == zone.name
+        and (candidate.camera_id is None or zone.camera_id is None or candidate.camera_id == zone.camera_id)
+    ]
+    legacy_is_unambiguous = len(matching_legacy_zones) == 1
+    events = db.query(DetectionEvent).all()
+    return [
+        event
+        for event in events
+        if event.zone_id == zone.id
+        or (
+            legacy_is_unambiguous
+            and event.zone_id is None
+            and event.zone_name == zone.name
+            and (zone.camera_id is None or event.camera_id == zone.camera_id)
+        )
+    ]
+
+
+def calculate_zone_risk(
+    db: Session,
+    zone: Zone,
+    all_zones: list[Zone],
+    now: datetime,
+) -> dict[str, Any]:
+    current_time = now.astimezone(timezone.utc) if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    events = zone_detection_events(db, zone, all_zones)
+    weights = configured_risk_weights()
+    event_values = [{"event_type": event.event_type, "created_at": event.created_at} for event in events]
+    score = score_events(
+        event_values,
+        current_time,
+        weights,
+        settings.risk_decay_half_life_minutes,
+    )
+    cutoff = current_time - timedelta(minutes=5)
+    earlier_events = [event for event in event_values if event["created_at"] <= cutoff]
+    score_five_minutes_ago = score_events(
+        earlier_events,
+        cutoff,
+        weights,
+        settings.risk_decay_half_life_minutes,
+    )
+    recent_events = [event for event in event_values if event["created_at"] >= cutoff]
+    samples = [
+        (entry.recorded_at, float(entry.score))
+        for entry in (
+            db.query(RiskScoreHistory)
+            .filter(
+                RiskScoreHistory.zone_id == zone.id,
+                RiskScoreHistory.is_simulated.is_(False),
+                RiskScoreHistory.recorded_at >= current_time - timedelta(minutes=15),
+                RiskScoreHistory.recorded_at <= current_time,
+            )
+            .order_by(RiskScoreHistory.recorded_at)
+            .all()
+        )
+    ]
+    velocity = regression_slope(samples, now=current_time, window_minutes=15)
+    trend = risk_trend(velocity)
+    return {
+        "score": score,
+        "trend": trend,
+        "velocity": velocity,
+        "rapid_escalation": velocity >= settings.risk_rapid_escalation_velocity,
+        "projected_score": project_score(score, velocity),
+        "explanation": risk_explanation(score, score_five_minutes_ago, recent_events),
+        "updated_at": serialize_utc_datetime(current_time),
+    }
+
+
+def store_zone_risk_sample(db: Session, zone: Zone, all_zones: list[Zone], now: datetime) -> RiskScoreHistory:
+    result = calculate_zone_risk(db, zone, all_zones, now)
+    history = RiskScoreHistory(
+        zone_id=zone.id,
+        score=result["score"],
+        trend=result["trend"],
+        velocity=result["velocity"],
+        projected_score=result["projected_score"],
+        explanation=result["explanation"],
+        is_simulated=False,
+        recorded_at=now,
+    )
+    db.add(history)
+    return history
+
+
+risk_scheduler_stop = threading.Event()
+risk_scheduler_thread: threading.Thread | None = None
+
+
+def risk_history_scheduler() -> None:
+    while not risk_scheduler_stop.wait(5):
+        active_camera_ids = vision.active_camera_ids()
+        db = SessionLocal()
+        try:
+            with vision_event_store_lock:
+                zones = db.query(Zone).all()
+                now = datetime.now(timezone.utc)
+                if active_camera_ids:
+                    zones_to_update = [
+                        zone for zone in zones
+                        if zone.camera_id is None or zone.camera_id in active_camera_ids
+                    ]
+                else:
+                    zones_to_update = [
+                        zone
+                        for zone in zones
+                        if calculate_zone_risk(db, zone, zones, now)["score"] > 0
+                    ]
+                for zone in zones_to_update:
+                    store_zone_risk_sample(db, zone, zones, now)
+                if zones_to_update:
+                    db.commit()
+        except Exception:
+            db.rollback()
+            logging.getLogger(__name__).exception("Unable to update zone risk history")
+        finally:
+            db.close()
+
+
+@app.on_event("startup")
+def start_risk_history_scheduler() -> None:
+    global risk_scheduler_thread
+    risk_scheduler_stop.clear()
+    if risk_scheduler_thread is None or not risk_scheduler_thread.is_alive():
+        risk_scheduler_thread = threading.Thread(
+            target=risk_history_scheduler,
+            name="risk-history-scheduler",
+            daemon=True,
+        )
+        risk_scheduler_thread.start()
+
+
+@app.on_event("shutdown")
+def stop_risk_history_scheduler() -> None:
+    risk_scheduler_stop.set()
+    if risk_scheduler_thread is not None:
+        risk_scheduler_thread.join(timeout=6)
+
+
+def risk_history_payload(entry: RiskScoreHistory) -> dict[str, Any]:
+    return {
+        "score": entry.score,
+        "trend": entry.trend,
+        "velocity": entry.velocity,
+        "projected_score": entry.projected_score,
+        "explanation": entry.explanation,
+        "is_simulated": entry.is_simulated,
+        "recorded_at": serialize_utc_datetime(entry.recorded_at),
+    }
+
+
+@app.get(f"{settings.api_v1_prefix}/risk/zones")
+def list_zone_risk(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    zones = db.query(Zone).order_by(Zone.id).all()
+    now = datetime.now(timezone.utc)
+    results = []
+    for zone in zones:
+        real_history = (
+            db.query(RiskScoreHistory)
+            .filter(
+                RiskScoreHistory.zone_id == zone.id,
+                RiskScoreHistory.is_simulated.is_(False),
+            )
+            .order_by(RiskScoreHistory.recorded_at.desc())
+            .limit(100)
+            .all()
+        )
+        simulated_history = (
+            db.query(RiskScoreHistory)
+            .filter(
+                RiskScoreHistory.zone_id == zone.id,
+                RiskScoreHistory.is_simulated.is_(True),
+            )
+            .order_by(RiskScoreHistory.recorded_at.desc())
+            .limit(100)
+            .all()
+        )
+        history = sorted(real_history + simulated_history, key=lambda entry: entry.recorded_at)
+        results.append(
+            {
+                "zone_id": zone.id,
+                "zone_name": zone.name,
+                "zone_type": zone.zone_type or ZoneType.NORMAL.value,
+                **calculate_zone_risk(db, zone, zones, now),
+                "history": [risk_history_payload(entry) for entry in history],
+            }
+        )
+    return results
+
+
+@app.post(f"{settings.api_v1_prefix}/risk/simulated-history")
+def seed_simulated_risk_history(
+    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    db.query(RiskScoreHistory).filter(RiskScoreHistory.is_simulated.is_(True)).delete(synchronize_session=False)
+    zones = db.query(Zone).order_by(Zone.id).all()
+    now = datetime.now(timezone.utc)
+    for zone_index, zone in enumerate(zones):
+        previous_score = 15 + zone_index * 8
+        for point_index in range(12):
+            recorded_at = now - timedelta(minutes=55 - point_index * 5)
+            score = max(0, min(100, 15 + zone_index * 8 + point_index * (3 + zone_index % 3)))
+            velocity = round((score - previous_score) / 5, 2) if point_index else 0.0
+            db.add(
+                RiskScoreHistory(
+                    zone_id=zone.id,
+                    score=score,
+                    trend=risk_trend(velocity),
+                    velocity=velocity,
+                    projected_score=project_score(score, velocity),
+                    explanation=f"SIMULATED history for {zone.name}; this is not a real detection.",
+                    is_simulated=True,
+                    recorded_at=recorded_at,
+                )
+            )
+            previous_score = score
+    db.commit()
+    return {"zones_seeded": len(zones), "samples_created": len(zones) * 12}
+
+
+@app.delete(f"{settings.api_v1_prefix}/risk/simulated-history")
+def clear_simulated_risk_history(
+    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    deleted = (
+        db.query(RiskScoreHistory)
+        .filter(RiskScoreHistory.is_simulated.is_(True))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"samples_deleted": deleted}
 
 
 @app.get(f"{settings.api_v1_prefix}/vision/models")
@@ -866,6 +1136,49 @@ def clear_camera_detection_data(
         "events_deleted": len(event_ids),
         "alerts_deleted": alerts_deleted,
         "evidence_deleted": len(evidence_filenames),
+    }
+
+
+@app.delete(f"{settings.api_v1_prefix}/detection-data")
+def clear_all_detection_data(
+    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    with vision_event_store_lock:
+        events = db.query(DetectionEvent).all()
+        event_ids = [event.id for event in events]
+        evidence_filenames = {event.evidence_filename for event in events}
+        alerts_deleted = db.query(SafetyAlert).count()
+        real_history_deleted = (
+            db.query(RiskScoreHistory)
+            .filter(RiskScoreHistory.is_simulated.is_(False))
+            .count()
+        )
+
+        db.query(SafetyAlert).delete(synchronize_session=False)
+        db.query(DetectionEvent).delete(synchronize_session=False)
+        db.query(RiskScoreHistory).filter(RiskScoreHistory.is_simulated.is_(False)).delete(
+            synchronize_session=False
+        )
+        db.commit()
+
+        failed_files = []
+        for filename in evidence_filenames:
+            try:
+                vision.get_evidence_path(filename).unlink(missing_ok=True)
+            except OSError:
+                failed_files.append(filename)
+        if failed_files:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Detection records were cleared, but {len(failed_files)} evidence frame(s) could not be deleted",
+            )
+
+    return {
+        "events_deleted": len(event_ids),
+        "alerts_deleted": alerts_deleted,
+        "evidence_deleted": len(evidence_filenames),
+        "risk_history_deleted": real_history_deleted,
     }
 
 

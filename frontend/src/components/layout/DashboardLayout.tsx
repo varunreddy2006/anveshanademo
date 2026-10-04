@@ -16,7 +16,7 @@ const navItems = [
   { to: '/dashboard', label: 'Overview', icon: LayoutDashboard },
   { to: '/dashboard/live-monitoring', label: 'Live Monitoring', icon: Video },
   { to: '/dashboard/safety-alerts', label: 'Safety Alerts', icon: AlertTriangle },
-  { to: '/dashboard/zone-risk', label: 'Zones & Thresholds', icon: Gauge },
+  { to: '/dashboard/zone-risk', label: 'Zone Risk & Thresholds', icon: Gauge },
   { to: '/dashboard/incidents', label: 'Incident History', icon: TrendingUp },
   { to: '/dashboard/reports', label: 'Reports', icon: FileText },
   { to: '/dashboard/cameras', label: 'Camera Management', icon: Camera },

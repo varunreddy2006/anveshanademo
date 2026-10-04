@@ -130,11 +130,20 @@ def latest_frame(state: WorkerState) -> bytes | None:
         return state.latest_frame
 
 
+def active_camera_ids() -> set[int]:
+    with _workers_lock:
+        return {
+            worker.camera_id
+            for worker in _workers.values()
+            if worker.thread is not None and worker.thread.is_alive() and not worker.stop_event.is_set()
+        }
+
+
 def _launch(
     state: WorkerState,
     source: int | str,
     zones: list[dict[str, Any]],
-    event_callback: Callable[[int, str, str, str, bytes, int], None],
+    event_callback: Callable[[int, str, str, str, bytes, int, int | None], None],
     credential_username: str | None = None,
     credential_password: str | None = None,
 ) -> None:
@@ -153,7 +162,7 @@ def start_camera(
     source_type: str,
     source_url: str | None,
     zones: list[dict[str, Any]],
-    event_callback: Callable[[int, str, str, str, bytes, int], None],
+    event_callback: Callable[[int, str, str, str, bytes, int, int | None], None],
     credential_username: str | None = None,
     credential_password: str | None = None,
 ) -> WorkerState:
@@ -174,7 +183,7 @@ def start_upload(
     camera_id: int,
     file_path: str,
     zones: list[dict[str, Any]],
-    event_callback: Callable[[int, str, str, str, bytes, int], None],
+    event_callback: Callable[[int, str, str, str, bytes, int, int | None], None],
 ) -> WorkerState:
     key = f"upload-{uuid.uuid4().hex}"
     state = WorkerState(key=key, camera_id=camera_id, source_type="upload")
@@ -198,7 +207,7 @@ def stop_camera(camera_id: int) -> WorkerState | None:
 
 def _emit_event(
     state: WorkerState,
-    event_callback: Callable[[int, str, str, str, bytes, int], None],
+    event_callback: Callable[[int, str, str, str, bytes, int, int | None], None],
     kind: str,
     zone_name: str,
     detail: str,
@@ -223,7 +232,7 @@ def _emit_event(
         if not is_reentry and previous is not None and event_time - previous < 30:
             return False
         state.last_event_at[event_key] = event_time
-    event_callback(state.camera_id, kind, zone_name, detail, evidence, frame_index)
+    event_callback(state.camera_id, kind, zone_name, detail, evidence, frame_index, zone_id)
     return True
 
 
@@ -231,7 +240,7 @@ def _run(
     state: WorkerState,
     source: int | str,
     zones: list[dict[str, Any]],
-    event_callback: Callable[[int, str, str, str, bytes, int], None],
+    event_callback: Callable[[int, str, str, str, bytes, int, int | None], None],
     credential_username: str | None,
     credential_password: str | None,
 ) -> None:
