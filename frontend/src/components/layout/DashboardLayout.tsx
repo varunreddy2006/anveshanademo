@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { DashboardLiveDataProvider } from './DashboardLiveData'
+import { useDashboardLiveData } from './DashboardLiveDataContext'
 import {
   AlertTriangle,
   Camera,
@@ -37,9 +38,10 @@ function getUserSession() {
   }
 }
 
-export function DashboardLayout() {
+function DashboardContent() {
   const navigate = useNavigate()
   const user = getUserSession()
+  const { newAlertCount } = useDashboardLiveData()
 
   async function handleLogout() {
     const token = window.localStorage.getItem('safety_auth_token')
@@ -88,6 +90,11 @@ export function DashboardLayout() {
               >
                 <Icon className="h-4 w-4" />
                 {label}
+                {to === '/dashboard/safety-alerts' && newAlertCount > 0 ? (
+                  <span className="ml-auto rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+                    {newAlertCount > 99 ? '99+' : newAlertCount}
+                  </span>
+                ) : null}
               </NavLink>
             ))}
           </nav>
@@ -122,12 +129,18 @@ export function DashboardLayout() {
           </header>
 
           <div className="p-4 lg:p-6">
-            <DashboardLiveDataProvider>
-              <Outlet />
-            </DashboardLiveDataProvider>
+            <Outlet />
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+export function DashboardLayout() {
+  return (
+    <DashboardLiveDataProvider>
+      <DashboardContent />
+    </DashboardLiveDataProvider>
   )
 }

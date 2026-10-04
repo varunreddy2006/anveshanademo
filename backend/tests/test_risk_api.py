@@ -1,5 +1,6 @@
 from collections.abc import Generator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +16,9 @@ from app.main import (
     app,
     get_current_user,
     get_db,
+    zone_period_analytics,
 )
+from app.risk import RiskWeights
 
 
 @pytest.fixture
@@ -112,6 +115,69 @@ def test_risk_endpoint_calculates_from_real_events_with_utc_timestamp(risk_clien
     assert risk["updated_at"].endswith("Z")
     assert "increased by 15 points" in risk["explanation"]
     assert "1 restricted-zone entry" in risk["explanation"]
+
+
+def test_risk_period_categories_recommendations_repeat_badge_and_comparison(risk_client) -> None:
+    client, _role = risk_client
+    now = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+    start = now - timedelta(hours=1)
+    previous_start = start - timedelta(hours=1)
+    events = [
+        SimpleNamespace(event_type="Restricted-zone entry", created_at=now - timedelta(minutes=5)),
+        SimpleNamespace(event_type="Restricted-zone entry", created_at=now - timedelta(minutes=4)),
+        SimpleNamespace(event_type="Restricted-zone entry", created_at=now - timedelta(minutes=3)),
+        SimpleNamespace(event_type="Hazard-zone proximity", created_at=now - timedelta(minutes=2)),
+        SimpleNamespace(event_type="Restricted-zone entry", created_at=now - timedelta(minutes=70)),
+        SimpleNamespace(event_type="Restricted-zone entry", created_at=now - timedelta(minutes=80)),
+        SimpleNamespace(event_type="Crowding threshold", created_at=now - timedelta(hours=3)),
+    ]
+
+    summary = zone_period_analytics(
+        events,
+        start=start,
+        previous_start=previous_start,
+        now=now,
+        weights=RiskWeights(),
+        half_life_minutes=30,
+    )
+    assert summary["period_event_count"] == 4
+    assert summary["event_categories"] == [
+        {"event_type": "Restricted-zone entry", "count": 3},
+        {"event_type": "Hazard-zone proximity", "count": 1},
+    ]
+    assert summary["recommendations"][0] == {
+        "event_type": "Restricted-zone entry",
+        "count": 3,
+        "action": "Review access controls and reinforce restricted-zone procedures.",
+    }
+    assert len(summary["recommendations"]) == 1
+    assert summary["period_score_change"] > 0
+
+    response = client.get("/api/risk/zones?period=today")
+    assert response.status_code == 200
+    zone = response.json()[0]
+    assert zone["period"] == "today"
+    assert zone["period_event_count"] == 1
+    assert zone["event_categories"] == [{"event_type": "Restricted-zone entry", "count": 1}]
+    assert zone["recommendations"][0]["event_type"] == "Restricted-zone entry"
+    assert zone["period_start"].endswith("Z")
+    for period in ("hour", "7d"):
+        assert client.get(f"/api/risk/zones?period={period}").status_code == 200
+
+
+def test_risk_configuration_endpoint_exposes_configured_weights_and_bands(risk_client) -> None:
+    client, _role = risk_client
+    config = client.get("/api/risk/config")
+
+    assert config.status_code == 200
+    assert config.json()["weights"] == {
+        "restricted_entry": 15,
+        "hazard_proximity": 12,
+        "crowding": 8,
+    }
+    assert config.json()["decay_half_life_minutes"] == 30
+    assert config.json()["bands"] == {"low_max": 33, "guarded_max": 55, "elevated_max": 75}
+    assert client.get("/api/risk/zones?period=invalid").status_code == 422
 
 
 @pytest.mark.parametrize("authorized_role", ["administrator", "safety_officer"])

@@ -1,18 +1,23 @@
 import { createContext, useContext } from 'react'
 
-import type { Camera, CameraVisionStatus, DetectionEvent, ZoneRisk } from '../../lib/api'
+import type { Camera, CameraVisionStatus, DetectionEvent, RiskPeriod, SafetyAlert, ZoneRisk } from '../../lib/api'
 
 export interface DashboardLiveDataValue {
   cameras: Camera[]
   cameraStatuses: Record<number, CameraVisionStatus>
   frames: Record<number, string>
   events: DetectionEvent[]
+  alerts: SafetyAlert[]
+  newAlertCount: number
   riskScores: ZoneRisk[]
+  riskPeriod: RiskPeriod
   transferProgress: Record<number, number>
   error: string
   refreshCameraStatuses: () => Promise<void>
   refreshEvents: () => Promise<void>
+  refreshAlerts: () => Promise<void>
   refreshRiskScores: () => Promise<void>
+  setRiskPeriod: (period: RiskPeriod) => void
   updateCameraStatus: (cameraId: number, status: CameraVisionStatus) => void
   updateTransferProgress: (cameraId: number, progress: number | null) => void
 }

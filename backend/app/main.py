@@ -4,10 +4,11 @@ import io
 import logging
 import secrets
 import threading
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
@@ -94,6 +95,7 @@ class AuditLog(Base):
     email = Column(String(255), nullable=False)
     role = Column(String(40), nullable=False)
     action = Column(String(40), nullable=False, default="login")
+    details = Column(String(500), nullable=True)
     logged_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
@@ -157,7 +159,18 @@ class SafetyAlert(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("detection_events.id", ondelete="CASCADE"), unique=True, nullable=False)
-    status = Column(String(30), nullable=False, default="Open")
+    status = Column(String(30), nullable=False, default="New", server_default="New")
+    assigned_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class AlertNote(Base):
+    __tablename__ = "alert_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    alert_id = Column(Integer, ForeignKey("safety_alerts.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    note = Column(String(2000), nullable=False)
     created_at = Column(UTCDateTime(), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
@@ -171,6 +184,28 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(..., min_length=4, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
+
+
+class AlertUpdate(BaseModel):
+    status: str | None = Field(default=None, regex="^(New|Acknowledged|Under Investigation|Resolved|False Positive)$")
+    assigned_user_id: int | None = None
+
+    @root_validator(pre=True)
+    def require_alert_change(cls, values: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(values, dict) or not ({"status", "assigned_user_id"} & values.keys()):
+            raise ValueError("Provide a status or assignment change")
+        return values
+
+
+class AlertNoteCreate(BaseModel):
+    note: str = Field(..., min_length=1, max_length=2000)
+
+    @validator("note")
+    def trim_note(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Note cannot be empty")
+        return value
 
 
 class UserPublic(BaseModel):
@@ -747,6 +782,71 @@ def calculate_zone_risk(
     }
 
 
+def risk_period_bounds(period: Literal["hour", "today", "7d"], now: datetime) -> tuple[datetime, datetime]:
+    current_time = now.astimezone(timezone.utc) if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    if period == "hour":
+        start = current_time - timedelta(hours=1)
+    elif period == "today":
+        start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start = current_time - timedelta(days=7)
+    duration = current_time - start
+    return start, start - duration
+
+
+def zone_period_analytics(
+    events: list[DetectionEvent],
+    *,
+    start: datetime,
+    previous_start: datetime,
+    now: datetime,
+    weights: RiskWeights,
+    half_life_minutes: float,
+) -> dict[str, Any]:
+    previous_end = start
+    current_events = [event for event in events if start <= event.created_at <= now]
+    previous_events = [event for event in events if previous_start <= event.created_at < previous_end]
+    score_for = lambda selected, evaluated_at: score_events(
+        (
+            {"event_type": event.event_type, "created_at": event.created_at}
+            for event in selected
+        ),
+        evaluated_at,
+        weights,
+        half_life_minutes,
+    )
+    current_score = score_for(current_events, now)
+    previous_score = score_for(previous_events, previous_end)
+    counts = Counter(event.event_type for event in current_events)
+    recommendations = {
+        "Restricted-zone entry": "Review access controls and reinforce restricted-zone procedures.",
+        "Hazard-zone proximity": "Inspect machinery guarding and verify the hazard exclusion distance.",
+        "Crowding threshold": "Review occupancy limits and consider staggering personnel in this zone.",
+    }
+    categories = [
+        {"event_type": event_type, "count": count}
+        for event_type, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    most_frequent_count = max(counts.values(), default=0)
+    actions = [
+        {
+            "event_type": category["event_type"],
+            "count": category["count"],
+            "action": recommendations[category["event_type"]],
+        }
+        for category in categories
+        if category["event_type"] in recommendations and category["count"] == most_frequent_count
+    ]
+    return {
+        "period_event_count": len(current_events),
+        "event_categories": categories,
+        "recommendations": actions,
+        "period_score": current_score,
+        "previous_period_score": previous_score,
+        "period_score_change": current_score - previous_score,
+    }
+
+
 def store_zone_risk_sample(db: Session, zone: Zone, all_zones: list[Zone], now: datetime) -> RiskScoreHistory:
     result = calculate_zone_risk(db, zone, all_zones, now)
     history = RiskScoreHistory(
@@ -829,23 +929,49 @@ def risk_history_payload(entry: RiskScoreHistory) -> dict[str, Any]:
     }
 
 
+@app.get(f"{settings.api_v1_prefix}/risk/config")
+def get_risk_config(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+    weights = configured_risk_weights()
+    return {
+        "weights": {
+            "restricted_entry": weights.restricted_entry,
+            "hazard_proximity": weights.hazard_proximity,
+            "crowding": weights.crowding,
+        },
+        "decay_half_life_minutes": settings.risk_decay_half_life_minutes,
+        "rapid_escalation_velocity": settings.risk_rapid_escalation_velocity,
+        "trend_window_minutes": 15,
+        "bands": {
+            "low_max": settings.risk_band_low_max,
+            "guarded_max": settings.risk_band_guarded_max,
+            "elevated_max": settings.risk_band_elevated_max,
+        },
+    }
+
+
 @app.get(f"{settings.api_v1_prefix}/risk/zones")
 def list_zone_risk(
+    period: Literal["hour", "today", "7d"] = Query(default="hour"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     zones = db.query(Zone).order_by(Zone.id).all()
     now = datetime.now(timezone.utc)
+    period_start, previous_period_start = risk_period_bounds(period, now)
+    weights = configured_risk_weights()
     results = []
     for zone in zones:
+        zone_events = zone_detection_events(db, zone, zones)
         real_history = (
             db.query(RiskScoreHistory)
             .filter(
                 RiskScoreHistory.zone_id == zone.id,
                 RiskScoreHistory.is_simulated.is_(False),
+                RiskScoreHistory.recorded_at >= period_start,
+                RiskScoreHistory.recorded_at <= now,
             )
             .order_by(RiskScoreHistory.recorded_at.desc())
-            .limit(100)
+            .limit(500)
             .all()
         )
         simulated_history = (
@@ -853,9 +979,11 @@ def list_zone_risk(
             .filter(
                 RiskScoreHistory.zone_id == zone.id,
                 RiskScoreHistory.is_simulated.is_(True),
+                RiskScoreHistory.recorded_at >= period_start,
+                RiskScoreHistory.recorded_at <= now,
             )
             .order_by(RiskScoreHistory.recorded_at.desc())
-            .limit(100)
+            .limit(500)
             .all()
         )
         history = sorted(real_history + simulated_history, key=lambda entry: entry.recorded_at)
@@ -879,6 +1007,16 @@ def list_zone_risk(
                 "zone_name": zone.name,
                 "zone_type": zone.zone_type or ZoneType.NORMAL.value,
                 **calculate_zone_risk(db, zone, zones, now),
+                **zone_period_analytics(
+                    zone_events,
+                    start=period_start,
+                    previous_start=previous_period_start,
+                    now=now,
+                    weights=weights,
+                    half_life_minutes=settings.risk_decay_half_life_minutes,
+                ),
+                "period_start": serialize_utc_datetime(period_start),
+                "period": period,
                 "simulated_demo": simulated_demo,
                 "history": [risk_history_payload(entry) for entry in history],
             }
@@ -1563,28 +1701,199 @@ def get_event_evidence(
     return FileResponse(evidence_path, media_type="image/jpeg")
 
 
+def safety_alert_payload(db: Session, alert: SafetyAlert, event: DetectionEvent) -> dict[str, Any]:
+    assignee = db.query(User).filter(User.id == alert.assigned_user_id).first() if alert.assigned_user_id else None
+    return {
+        **event_payload(
+            event,
+            db.query(Camera).filter(Camera.id == event.camera_id).first() if event.camera_id else None,
+        ),
+        "alert_id": alert.id,
+        "status": alert.status,
+        "severity": "High" if event.event_type == "Restricted-zone entry" else "Medium",
+        "created_at": serialize_utc_datetime(alert.created_at),
+        "assigned_user_id": alert.assigned_user_id,
+        "assigned_user_name": assignee.full_name if assignee else None,
+        "zone_id": event.zone_id,
+    }
+
+
+def record_alert_action(db: Session, user: User, alert_id: int, action: str, details: str) -> None:
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            email=user.email,
+            role=user.role,
+            action=action,
+            details=f"Alert {alert_id}: {details}"[:500],
+        )
+    )
+
+
+@app.get(f"{settings.api_v1_prefix}/users/assignable")
+def list_assignable_users(
+    current_user: User = Depends(require_roles([UserRole.SAFETY_OFFICER.value, UserRole.ADMINISTRATOR.value])),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    return [
+        {"id": user.id, "full_name": user.full_name, "role": user.role}
+        for user in (
+            db.query(User)
+            .filter(User.role.in_([UserRole.SAFETY_OFFICER.value, UserRole.ADMINISTRATOR.value]))
+            .order_by(User.full_name)
+            .all()
+        )
+    ]
+
+
 @app.get(f"{settings.api_v1_prefix}/alerts")
 def list_safety_alerts(
+    severity: str | None = Query(default=None, regex="^(High|Medium)$"),
+    alert_status: str | None = Query(
+        default=None,
+        alias="status",
+        regex="^(New|Acknowledged|Under Investigation|Resolved|False Positive)$",
+    ),
+    zone_id: int | None = Query(default=None),
+    camera_id: int | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    rows = (
+    query = db.query(SafetyAlert, DetectionEvent).join(
+        DetectionEvent, SafetyAlert.event_id == DetectionEvent.id
+    )
+    if alert_status:
+        query = query.filter(SafetyAlert.status == alert_status)
+    if severity == "High":
+        query = query.filter(DetectionEvent.event_type == "Restricted-zone entry")
+    elif severity == "Medium":
+        query = query.filter(DetectionEvent.event_type != "Restricted-zone entry")
+    if zone_id is not None:
+        query = query.filter(DetectionEvent.zone_id == zone_id)
+    if camera_id is not None:
+        query = query.filter(DetectionEvent.camera_id == camera_id)
+    if date_from is not None:
+        query = query.filter(SafetyAlert.created_at >= datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc))
+    if date_to is not None:
+        if date_from is not None and date_to < date_from:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="End date must not precede start date")
+        query = query.filter(
+            SafetyAlert.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        )
+    rows = query.order_by(SafetyAlert.created_at.desc()).limit(500).all()
+    return [safety_alert_payload(db, alert, event) for alert, event in rows]
+
+
+@app.get(f"{settings.api_v1_prefix}/alerts/{{alert_id}}")
+def get_safety_alert(
+    alert_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = (
         db.query(SafetyAlert, DetectionEvent)
         .join(DetectionEvent, SafetyAlert.event_id == DetectionEvent.id)
-        .order_by(SafetyAlert.created_at.desc())
-        .limit(100)
+        .filter(SafetyAlert.id == alert_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+    alert, event = row
+    notes = (
+        db.query(AlertNote, User)
+        .outerjoin(User, User.id == AlertNote.user_id)
+        .filter(AlertNote.alert_id == alert_id)
+        .order_by(AlertNote.created_at)
         .all()
     )
-    return [
-        {
-            **event_payload(event, db.query(Camera).filter(Camera.id == event.camera_id).first() if event.camera_id else None),
-            "alert_id": alert.id,
-            "status": alert.status,
-            "severity": "High" if event.event_type == "Restricted-zone entry" else "Medium",
-            "created_at": serialize_utc_datetime(alert.created_at),
-        }
-        for alert, event in rows
-    ]
+    return {
+        **safety_alert_payload(db, alert, event),
+        "notes": [
+            {
+                "id": note.id,
+                "user_id": note.user_id,
+                "user_name": user.full_name if user else "Former user",
+                "note": note.note,
+                "created_at": serialize_utc_datetime(note.created_at),
+            }
+            for note, user in notes
+        ],
+    }
+
+
+@app.patch(f"{settings.api_v1_prefix}/alerts/{{alert_id}}")
+def update_safety_alert(
+    alert_id: int,
+    payload: AlertUpdate,
+    current_user: User = Depends(
+        require_roles([UserRole.SAFETY_OFFICER.value, UserRole.ADMINISTRATOR.value])
+    ),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    alert = db.query(SafetyAlert).filter(SafetyAlert.id == alert_id).first()
+    if alert is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+    changes = payload.dict(exclude_unset=True)
+    if "status" in changes and changes["status"] != alert.status:
+        previous_status = alert.status
+        alert.status = changes["status"]
+        record_alert_action(
+            db, current_user, alert.id, "alert_status",
+            f"status changed from {previous_status} to {alert.status}",
+        )
+    if "assigned_user_id" in changes and changes["assigned_user_id"] != alert.assigned_user_id:
+        assigned_user_id = changes["assigned_user_id"]
+        assignee = None
+        if assigned_user_id is not None:
+            assignee = db.query(User).filter(User.id == assigned_user_id).first()
+            if assignee is None or assignee.role not in {
+                UserRole.SAFETY_OFFICER.value,
+                UserRole.ADMINISTRATOR.value,
+            }:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Select an active safety officer or administrator")
+        previous_id = alert.assigned_user_id
+        alert.assigned_user_id = assigned_user_id
+        record_alert_action(
+            db,
+            current_user,
+            alert.id,
+            "alert_assignment",
+            f"assignment changed from user {previous_id or 'unassigned'} to {assignee.full_name if assignee else 'unassigned'}",
+        )
+    db.commit()
+    event = db.query(DetectionEvent).filter(DetectionEvent.id == alert.event_id).first()
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Detection event not found")
+    return safety_alert_payload(db, alert, event)
+
+
+@app.post(f"{settings.api_v1_prefix}/alerts/{{alert_id}}/notes", status_code=status.HTTP_201_CREATED)
+def add_safety_alert_note(
+    alert_id: int,
+    payload: AlertNoteCreate,
+    current_user: User = Depends(
+        require_roles([UserRole.SAFETY_OFFICER.value, UserRole.ADMINISTRATOR.value])
+    ),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    alert = db.query(SafetyAlert).filter(SafetyAlert.id == alert_id).first()
+    if alert is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alert not found")
+    note = AlertNote(alert_id=alert.id, user_id=current_user.id, note=payload.note)
+    db.add(note)
+    db.flush()
+    record_alert_action(db, current_user, alert.id, "alert_note", f"note added: {payload.note}")
+    db.commit()
+    db.refresh(note)
+    return {
+        "id": note.id,
+        "user_id": current_user.id,
+        "user_name": current_user.full_name,
+        "note": note.note,
+        "created_at": serialize_utc_datetime(note.created_at),
+    }
 
 
 @app.get(f"{settings.api_v1_prefix}/audit-logs")
@@ -1599,6 +1908,7 @@ def list_audit_logs(
             "email": log.email,
             "role": log.role,
             "action": log.action,
+            "details": log.details,
             "logged_at": serialize_utc_datetime(log.logged_at),
         }
         for log in db.query(AuditLog).order_by(AuditLog.logged_at.desc()).limit(100).all()

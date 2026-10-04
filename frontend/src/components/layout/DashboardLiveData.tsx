@@ -6,6 +6,8 @@ import {
   type Camera,
   type CameraVisionStatus,
   type DetectionEvent,
+  type RiskPeriod,
+  type SafetyAlert,
 } from '../../lib/api'
 import { DashboardLiveDataContext } from './DashboardLiveDataContext'
 import type { ZoneRisk } from '../../lib/api'
@@ -19,7 +21,9 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
   const [cameraStatuses, setCameraStatuses] = useState<Record<number, CameraVisionStatus>>({})
   const [frames, setFrames] = useState<Record<number, string>>({})
   const [events, setEvents] = useState<DetectionEvent[]>([])
+  const [alerts, setAlerts] = useState<SafetyAlert[]>([])
   const [riskScores, setRiskScores] = useState<ZoneRisk[]>([])
+  const [riskPeriod, setRiskPeriod] = useState<RiskPeriod>('hour')
   const [transferProgress, setTransferProgress] = useState<Record<number, number>>({})
   const [error, setError] = useState('')
   const frameUrls = useRef<Record<number, string>>({})
@@ -74,13 +78,21 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
     }
   }, [])
 
-  const refreshRiskScores = useCallback(async () => {
+  const refreshAlerts = useCallback(async () => {
     try {
-      setRiskScores(await apiRequest<ZoneRisk[]>('/api/risk/zones'))
+      setAlerts(await apiRequest<SafetyAlert[]>('/api/alerts'))
     } catch (refreshError) {
       setError(errorMessage(refreshError))
     }
   }, [])
+
+  const refreshRiskScores = useCallback(async () => {
+    try {
+      setRiskScores(await apiRequest<ZoneRisk[]>(`/api/risk/zones?period=${riskPeriod}`))
+    } catch (refreshError) {
+      setError(errorMessage(refreshError))
+    }
+  }, [riskPeriod])
 
   const updateCameraStatus = useCallback((cameraId: number, status: CameraVisionStatus) => {
     setCameraStatuses((current) => ({ ...current, [cameraId]: status }))
@@ -101,10 +113,11 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
     let cancelled = false
     async function refreshSharedData() {
       try {
-        const [cameraData, eventData, riskData] = await Promise.all([
+        const [cameraData, eventData, riskData, alertData] = await Promise.all([
           apiRequest<Camera[]>('/api/cameras'),
           apiRequest<DetectionEvent[]>('/api/events'),
-          apiRequest<ZoneRisk[]>('/api/risk/zones'),
+          apiRequest<ZoneRisk[]>(`/api/risk/zones?period=${riskPeriod}`),
+          apiRequest<SafetyAlert[]>('/api/alerts'),
         ])
         if (cancelled) return
         setCameras((current) => {
@@ -122,6 +135,7 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
           return unchanged ? current : cameraData
         })
         setEvents(eventData)
+        setAlerts(alertData)
         setRiskScores(riskData)
         void refreshCameraStatuses(cameraData)
       } catch (refreshError) {
@@ -140,7 +154,7 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
       window.clearInterval(sharedInterval)
       window.clearInterval(statusInterval)
     }
-  }, [refreshCameraStatuses])
+  }, [refreshCameraStatuses, riskPeriod])
 
   useEffect(
     () => () => {
@@ -156,12 +170,17 @@ export function DashboardLiveDataProvider({ children }: { children: ReactNode })
         cameraStatuses,
         frames,
         events,
+        alerts,
+        newAlertCount: alerts.filter((alert) => alert.status === 'New').length,
         riskScores,
+        riskPeriod,
         transferProgress,
         error,
         refreshCameraStatuses: () => refreshCameraStatuses(),
         refreshEvents,
+        refreshAlerts,
         refreshRiskScores,
+        setRiskPeriod,
         updateCameraStatus,
         updateTransferProgress,
       }}

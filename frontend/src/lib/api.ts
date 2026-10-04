@@ -76,6 +76,33 @@ export interface SimulatedRiskDemo {
   updated_at: string
 }
 
+export type RiskPeriod = 'hour' | 'today' | '7d'
+
+export interface RiskEventCategory {
+  event_type: string
+  count: number
+}
+
+export interface RiskRecommendation extends RiskEventCategory {
+  action: string
+}
+
+export interface RiskScoringConfig {
+  weights: {
+    restricted_entry: number
+    hazard_proximity: number
+    crowding: number
+  }
+  decay_half_life_minutes: number
+  rapid_escalation_velocity: number
+  trend_window_minutes: number
+  bands: {
+    low_max: number
+    guarded_max: number
+    elevated_max: number
+  }
+}
+
 export interface ZoneRisk {
   zone_id: number
   zone_name: string
@@ -87,6 +114,14 @@ export interface ZoneRisk {
   projected_score: number
   explanation: string
   updated_at: string
+  period_start: string
+  period: RiskPeriod
+  period_event_count: number
+  event_categories: RiskEventCategory[]
+  recommendations: RiskRecommendation[]
+  period_score: number
+  previous_period_score: number
+  period_score_change: number
   simulated_demo: SimulatedRiskDemo | null
   history: RiskHistoryPoint[]
 }
@@ -119,8 +154,26 @@ export interface DetectionEvent {
 
 export interface SafetyAlert extends DetectionEvent {
   alert_id: number
-  status: string
+  status: 'New' | 'Acknowledged' | 'Under Investigation' | 'Resolved' | 'False Positive'
   severity: 'High' | 'Medium'
+  zone_id: number | null
+  assigned_user_id: number | null
+  assigned_user_name: string | null
+  notes?: AlertNote[]
+}
+
+export interface AlertNote {
+  id: number
+  user_id: number | null
+  user_name: string
+  note: string
+  created_at: string
+}
+
+export interface AssignableUser {
+  id: number
+  full_name: string
+  role: 'administrator' | 'safety_officer'
 }
 
 export interface Incident extends DetectionEvent {

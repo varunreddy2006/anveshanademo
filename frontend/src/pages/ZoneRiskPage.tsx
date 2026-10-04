@@ -1,20 +1,25 @@
 import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Camera as CameraIcon, Pencil, Plus, Trash2, Upload, X } from 'lucide-react'
 import { type FormEvent, type PointerEvent, useCallback, useEffect, useRef, useState } from 'react'
 
-import { apiBlob, apiRequest, type Camera, type RiskHistoryPoint, type Zone, type ZoneInput, type ZoneRisk, type ZoneType } from '../lib/api'
+import { apiBlob, apiRequest, type Camera, type RiskHistoryPoint, type RiskPeriod, type RiskScoringConfig, type Zone, type ZoneInput, type ZoneRisk, type ZoneType } from '../lib/api'
 import { useDashboardLiveData } from '../components/layout/DashboardLiveDataContext'
 
-const riskBands = [
-  { max: 33, label: 'Low', classes: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300', stroke: '#34d399' },
-  { max: 55, label: 'Guarded', classes: 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200', stroke: '#facc15' },
-  { max: 75, label: 'Elevated', classes: 'border-orange-500/40 bg-orange-500/10 text-orange-300', stroke: '#fb923c' },
-  { max: 100, label: 'High', classes: 'border-red-500/40 bg-red-500/10 text-red-300', stroke: '#f87171' },
-]
+const fallbackBands = { low_max: 33, guarded_max: 55, elevated_max: 75 }
 
-function riskBand(score: number) {
-  return riskBands.find((band) => score <= band.max) ?? riskBands[riskBands.length - 1]
+function riskBands(config: RiskScoringConfig | null) {
+  const thresholds = config?.bands ?? fallbackBands
+  return [
+    { max: thresholds.low_max, label: 'Low', classes: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300', stroke: '#34d399' },
+    { max: thresholds.guarded_max, label: 'Guarded', classes: 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200', stroke: '#facc15' },
+    { max: thresholds.elevated_max, label: 'Elevated', classes: 'border-orange-500/40 bg-orange-500/10 text-orange-300', stroke: '#fb923c' },
+    { max: 100, label: 'High', classes: 'border-red-500/40 bg-red-500/10 text-red-300', stroke: '#f87171' },
+  ]
 }
 
+function riskBand(score: number, config: RiskScoringConfig | null) {
+  const bands = riskBands(config)
+  return bands.find((band) => score <= band.max) ?? bands[bands.length - 1]
+}
 function canClearDetectionData() {
   try {
     const user: unknown = JSON.parse(window.localStorage.getItem('safety_user') ?? 'null')
@@ -29,7 +34,7 @@ function canClearDetectionData() {
   }
 }
 
-function chartPath(points: RiskHistoryPoint[], current: ZoneRisk, simulated: boolean) {
+function chartPath(points: RiskHistoryPoint[], current: ZoneRisk, simulated: boolean, period: RiskPeriod) {
   const chartValues = points.filter((point) => point.is_simulated === simulated)
   if (simulated && chartValues.length === 0) return ''
   if (!simulated) {
@@ -43,10 +48,19 @@ function chartPath(points: RiskHistoryPoint[], current: ZoneRisk, simulated: boo
       recorded_at: current.updated_at,
     })
   }
+  const periodStart = new Date(current.period_start).getTime()
   const currentTime = new Date(current.updated_at).getTime()
+  const rangeMilliseconds = Math.max(
+    1,
+    period === 'hour'
+      ? 60 * 60_000
+      : period === 'today'
+        ? currentTime - periodStart
+        : 7 * 24 * 60 * 60_000,
+  )
   const chartX = (timestamp: string) => {
-    const minutesFromWindowStart = (new Date(timestamp).getTime() - (currentTime - 60 * 60_000)) / 60_000
-    return 10 + Math.max(0, Math.min(65, minutesFromWindowStart)) * (300 / 65)
+    const fraction = (new Date(timestamp).getTime() - periodStart) / rangeMilliseconds
+    return 10 + Math.max(0, Math.min(1, fraction)) * 260
   }
   return chartValues
     .map((point, index) => `${index === 0 ? 'M' : 'L'}${chartX(point.recorded_at).toFixed(1)},${(90 - point.score * 0.8).toFixed(1)}`)
@@ -230,14 +244,14 @@ function formFromZone(zone: Zone): ZoneFormState {
   }
 }
 
-function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
-  const band = riskBand(risk.score)
+function ZoneRiskCard({ risk, config, period }: { risk: ZoneRisk; config: RiskScoringConfig | null; period: RiskPeriod }) {
+  const band = riskBand(risk.score, config)
   const simulated = risk.simulated_demo
-  const simulatedBand = simulated ? riskBand(simulated.score) : null
+  const simulatedBand = simulated ? riskBand(simulated.score, config) : null
   const TrendIcon = risk.trend === 'increasing' ? ArrowUp : risk.trend === 'decreasing' ? ArrowDown : ArrowRight
-  const realPath = chartPath(risk.history, risk, false)
-  const simulatedPath = chartPath(risk.history, risk, true)
-  const currentX = 10 + (60 * 300 / 65)
+  const realPath = chartPath(risk.history, risk, false, period)
+  const simulatedPath = chartPath(risk.history, risk, true, period)
+  const currentX = 270
   const projectedX = 310
   const currentY = 90 - risk.score * 0.8
   const projectedY = 90 - risk.projected_score * 0.8
@@ -271,6 +285,16 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
       <p className="mt-4 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-300">
         5-minute calculated projection: <strong className="text-white">{risk.projected_score}/100</strong>
       </p>
+      <p className="mt-2 text-xs text-slate-400">
+        Compared with the previous period: <strong className={risk.period_score_change > 0 ? 'text-orange-200' : risk.period_score_change < 0 ? 'text-emerald-200' : 'text-slate-200'}>
+          {risk.period_score_change > 0 ? `up ${risk.period_score_change}` : risk.period_score_change < 0 ? `down ${Math.abs(risk.period_score_change)}` : 'unchanged'} points
+        </strong>
+      </p>
+      {risk.period_event_count >= 3 ? (
+        <p className="mt-3 inline-flex rounded-full border border-orange-500/40 bg-orange-500/10 px-2.5 py-1 text-xs font-semibold text-orange-200">
+          Repeated risk · {risk.period_event_count} events
+        </p>
+      ) : null}
 
       {risk.score > 70 && risk.trend === 'increasing' ? (
         <p role="status" className="mt-3 flex items-center gap-2 rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-sm font-medium text-orange-200">
@@ -284,6 +308,29 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
       ) : null}
 
       <p className="mt-4 min-h-10 text-sm leading-5 text-slate-400">{risk.explanation}</p>
+
+      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/50 p-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Most frequent incidents · selected period</p>
+        {risk.event_categories.length ? (
+          <ul className="mt-2 space-y-1 text-sm text-slate-300">
+            {risk.event_categories.map((category) => (
+              <li key={category.event_type} className="flex justify-between gap-3">
+                <span>{category.event_type}</span><strong>{category.count}</strong>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="mt-2 text-sm text-slate-500">No incidents in this period.</p>}
+        {risk.recommendations.length ? (
+          <div className="mt-3 border-t border-slate-800 pt-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Recommended actions</p>
+            <ul className="mt-2 space-y-2 text-sm text-slate-300">
+              {risk.recommendations.map((recommendation) => (
+                <li key={recommendation.event_type}><span className="font-medium text-white">{recommendation.event_type} ({recommendation.count}):</span> {recommendation.action}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
 
       {simulated ? (
         <div className="mt-4 rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/5 p-3">
@@ -315,7 +362,7 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
 
       <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/40 p-3">
         <div className="mb-2 flex items-center justify-between">
-          <p className="text-xs font-medium text-slate-300">Risk trend · last hour</p>
+          <p className="text-xs font-medium text-slate-300">Risk trend · {period === 'hour' ? 'last hour' : period === 'today' ? 'today' : 'last 7 days'}</p>
           {simulatedPath ? <span className="rounded bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-fuchsia-200">SIMULATED</span> : null}
         </div>
         <svg viewBox="0 0 320 100" role="img" aria-label={`Risk trend chart for ${risk.zone_name}`} className="h-28 w-full overflow-visible">
@@ -324,8 +371,8 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
           {simulatedPath ? <path d={simulatedPath} fill="none" stroke="#e879f9" strokeWidth="2" strokeDasharray="4 4" strokeLinejoin="round" /> : null}
           <path d={`M${currentX.toFixed(1)},${currentY.toFixed(1)} L${projectedX},${projectedY.toFixed(1)}`} fill="none" stroke={band.stroke} strokeWidth="2" strokeDasharray="5 4" />
           {simulated ? <path d={`M${currentX.toFixed(1)},${simulatedCurrentY.toFixed(1)} L${projectedX},${simulatedProjectedY.toFixed(1)}`} fill="none" stroke="#e879f9" strokeWidth="2" strokeDasharray="2 4" /> : null}
-          <text x="10" y="99" fill="#64748b" fontSize="8">−60m</text>
-          <text x="270" y="99" fill="#64748b" fontSize="8">now</text>
+          <text x="10" y="99" fill="#64748b" fontSize="8">{period === 'hour' ? '−60m' : period === 'today' ? 'start of day' : '−7d'}</text>
+          <text x="253" y="99" fill="#64748b" fontSize="8">now</text>
           <text x="294" y="99" fill="#64748b" fontSize="8">+5m</text>
         </svg>
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-500">
@@ -340,9 +387,10 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
 }
 
 export function ZoneRiskPage() {
-  const { riskScores, refreshRiskScores, refreshEvents } = useDashboardLiveData()
+  const { riskScores, riskPeriod, setRiskPeriod, refreshRiskScores, refreshEvents } = useDashboardLiveData()
   const [zones, setZones] = useState<Zone[]>([])
   const [cameras, setCameras] = useState<Camera[]>([])
+  const [riskConfig, setRiskConfig] = useState<RiskScoringConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [riskActionBusy, setRiskActionBusy] = useState(false)
   const [detectionResetBusy, setDetectionResetBusy] = useState(false)
@@ -375,10 +423,12 @@ export function ZoneRiskPage() {
     Promise.all([
       apiRequest<Zone[]>('/api/zones'),
       apiRequest<Camera[]>('/api/cameras'),
+      apiRequest<RiskScoringConfig>('/api/risk/config'),
     ])
-      .then(([loadedZones, loadedCameras]) => {
+      .then(([loadedZones, loadedCameras, loadedRiskConfig]) => {
         setZones(loadedZones)
         setCameras(loadedCameras)
+        setRiskConfig(loadedRiskConfig)
       })
       .catch((loadError: unknown) => setError(getErrorMessage(loadError)))
       .finally(() => setLoading(false))
@@ -630,12 +680,42 @@ export function ZoneRiskPage() {
             </button>
           ) : null}
         </div>
-        <p className="text-xs text-slate-500">
-          Weights, decay, and the rapid escalation threshold are configurable with RISK_WEIGHT_RESTRICTED_ENTRY, RISK_WEIGHT_HAZARD_PROXIMITY, RISK_WEIGHT_CROWDING, RISK_DECAY_HALF_LIFE_MINUTES, and RISK_RAPID_ESCALATION_VELOCITY.
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            Trend period
+            <select
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"
+              value={riskPeriod}
+              onChange={(event) => setRiskPeriod(event.target.value as RiskPeriod)}
+            >
+              <option value="hour">Last hour</option>
+              <option value="today">Today</option>
+              <option value="7d">7 days</option>
+            </select>
+          </label>
+          <details className="w-full rounded-xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-slate-300">
+            <summary className="cursor-pointer font-medium text-white">How this score is calculated</summary>
+            {riskConfig ? (
+              <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                <p>Restricted-zone entry weight: <strong>{riskConfig.weights.restricted_entry}</strong></p>
+                <p>Hazard proximity weight: <strong>{riskConfig.weights.hazard_proximity}</strong></p>
+                <p>Crowding weight: <strong>{riskConfig.weights.crowding}</strong></p>
+                <p>Decay half-life: <strong>{riskConfig.decay_half_life_minutes} minutes</strong></p>
+                <p>Trend window: <strong>{riskConfig.trend_window_minutes} minutes</strong></p>
+                <p>Rapid escalation: <strong>{riskConfig.rapid_escalation_velocity} points/minute</strong></p>
+                <p className="sm:col-span-2">
+                  Score bands: Green/Low 0–{riskConfig.bands.low_max}, Yellow/Guarded {riskConfig.bands.low_max + 1}–{riskConfig.bands.guarded_max}, Orange/Elevated {riskConfig.bands.guarded_max + 1}–{riskConfig.bands.elevated_max}, Red/High {riskConfig.bands.elevated_max + 1}–100.
+                </p>
+                <p className="sm:col-span-2 text-slate-400">
+                  Event contributions decay exponentially by half every configured half-life, then sum to a score capped at 100. Simulated history is displayed separately and is excluded from this score.
+                </p>
+              </div>
+            ) : <p className="mt-2 text-xs text-slate-500">Loading configured risk weights and thresholds…</p>}
+          </details>
+        </div>
         {riskScores.length > 0 ? (
           <div className="grid gap-4 xl:grid-cols-2">
-            {riskScores.map((risk) => <ZoneRiskCard key={risk.zone_id} risk={risk} />)}
+            {riskScores.map((risk) => <ZoneRiskCard key={risk.zone_id} risk={risk} config={riskConfig} period={riskPeriod} />)}
           </div>
         ) : !loading ? (
           <div className="rounded-2xl border border-slate-800 bg-slate-950 px-5 py-8 text-center text-sm text-slate-500">
