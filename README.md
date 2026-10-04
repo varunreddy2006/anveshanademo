@@ -38,6 +38,9 @@ cd backend
 - Backend role checks protect authorized endpoints, and each successful login writes an audit record.
 - Frontend auth pages now send real requests to the API and persist the session token locally.
 
-## Next phase
+## Phase 3 status
 
-Phase 3 will add the first real operational workflows beyond the auth shell.
+- Authenticated camera CRUD is available at `/api/cameras`; camera stream credentials may be supplied separately and are never included in camera API responses.
+- Authenticated zone CRUD is available at `/api/zones`, with normalized rectangular or polygon geometry plus crowd and confidence thresholds.
+- The Camera Management and Zones & Thresholds dashboard pages use these API endpoints.
+- New resource tables are created automatically on backend startup for the default SQLite database.
