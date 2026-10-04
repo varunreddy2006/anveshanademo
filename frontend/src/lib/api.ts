@@ -66,6 +66,16 @@ export interface RiskHistoryPoint {
   recorded_at: string
 }
 
+export interface SimulatedRiskDemo {
+  score: number
+  trend: 'increasing' | 'stable' | 'decreasing'
+  velocity: number
+  rapid_escalation: boolean
+  projected_score: number
+  explanation: string
+  updated_at: string
+}
+
 export interface ZoneRisk {
   zone_id: number
   zone_name: string
@@ -77,6 +87,7 @@ export interface ZoneRisk {
   projected_score: number
   explanation: string
   updated_at: string
+  simulated_demo: SimulatedRiskDemo | null
   history: RiskHistoryPoint[]
 }
 
@@ -90,6 +101,8 @@ export interface CameraVisionStatus {
   processed_frames?: number
   total_frames?: number | null
   completed?: boolean
+  running?: boolean
+  has_frame?: boolean
 }
 
 export interface DetectionEvent {

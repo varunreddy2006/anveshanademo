@@ -1,25 +1,26 @@
 import { Camera, CircleStop, PlayCircle, Trash2, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
-  apiBlob,
   apiRequest,
   formatLocalTimestamp,
   uploadVideo,
   type Camera as CameraRecord,
   type CameraVisionStatus,
-  type DetectionEvent,
-  type UploadJob,
   type VisionModels,
   type Zone,
 } from '../lib/api'
+import { useDashboardLiveData } from '../components/layout/DashboardLiveDataContext'
 
 const inputClass =
   'w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-blue-500'
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 type CameraSource = 'webcam' | 'stream'
-type UploadProgress = { jobId: string; progress: number; completed: boolean; error?: string }
+
+function savedCameraSource(cameraId: number): CameraSource {
+  return window.localStorage.getItem(`safety_live_input_${cameraId}`) === 'stream' ? 'stream' : 'webcam'
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unable to complete the monitoring request.'
@@ -41,144 +42,51 @@ function hasAdministratorRole() {
 }
 
 export function LiveMonitoringPage() {
-  const [cameras, setCameras] = useState<CameraRecord[]>([])
+  const {
+    cameras,
+    cameraStatuses,
+    frames,
+    events,
+    transferProgress,
+    error: sharedError,
+    refreshCameraStatuses,
+    refreshEvents,
+    updateCameraStatus,
+    updateTransferProgress,
+  } = useDashboardLiveData()
   const [zones, setZones] = useState<Zone[]>([])
-  const [cameraStatuses, setCameraStatuses] = useState<Record<number, CameraVisionStatus>>({})
-  const [activeCameras, setActiveCameras] = useState<Record<number, boolean>>({})
   const [sources, setSources] = useState<Record<number, CameraSource>>({})
-  const [frames, setFrames] = useState<Record<number, string>>({})
-  const [uploadJobs, setUploadJobs] = useState<Record<number, UploadProgress>>({})
-  const [transferProgress, setTransferProgress] = useState<Record<number, number>>({})
-  const [events, setEvents] = useState<DetectionEvent[]>([])
   const [models, setModels] = useState<VisionModels | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [isAdministrator] = useState(hasAdministratorRole)
   const [clearingCameraId, setClearingCameraId] = useState<number | null>(null)
-  const uploadJobsRef = useRef(uploadJobs)
-  const frameUrlsRef = useRef<Record<number, string>>({})
-
-  function updateUploadJob(cameraId: number, job: UploadProgress) {
-    setUploadJobs((current) => {
-      const updated = { ...current, [cameraId]: job }
-      uploadJobsRef.current = updated
-      return updated
-    })
-  }
 
   useEffect(() => {
     Promise.all([
-      apiRequest<CameraRecord[]>('/api/cameras'),
       apiRequest<Zone[]>('/api/zones'),
       apiRequest<VisionModels>('/api/vision/models'),
-      apiRequest<DetectionEvent[]>('/api/events'),
     ])
-      .then(([cameraData, zoneData, modelData, eventData]) => {
-        setCameras(cameraData)
+      .then(([zoneData, modelData]) => {
         setZones(zoneData)
         setModels(modelData)
-        setEvents(eventData)
-        setSources(Object.fromEntries(cameraData.map((camera) => [camera.id, 'webcam'])))
-        setCameraStatuses(
-          Object.fromEntries(cameraData.map((camera) => [camera.id, { camera_id: camera.id, status: 'Not connected' }])),
-        )
       })
       .catch((loadError: unknown) => setError(errorMessage(loadError)))
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      for (const camera of cameras) {
-        const cameraId = camera.id
-        apiRequest<CameraVisionStatus>(`/api/cameras/${cameraId}/vision/status`)
-          .then((status) => {
-            setCameraStatuses((current) => ({ ...current, [cameraId]: status }))
-            if (status.status === 'Connected') {
-              apiBlob(`/api/cameras/${cameraId}/vision/frame`)
-                .then((blob) => {
-                  const url = URL.createObjectURL(blob)
-                  const previous = frameUrlsRef.current[cameraId]
-                  if (previous) URL.revokeObjectURL(previous)
-                  frameUrlsRef.current[cameraId] = url
-                  setFrames((current) => ({ ...current, [cameraId]: url }))
-                })
-                .catch(() => undefined)
-            } else if (status.status === 'Error') {
-              setActiveCameras((current) => ({ ...current, [cameraId]: false }))
-            }
-          })
-          .catch((statusError: unknown) => {
-            setCameraStatuses((current) => ({
-              ...current,
-              [cameraId]: { camera_id: cameraId, status: 'Error', error: errorMessage(statusError) },
-            }))
-          })
-      }
-    }, 1500)
-    return () => window.clearInterval(interval)
-  }, [cameras])
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      for (const [cameraIdText, job] of Object.entries(uploadJobsRef.current)) {
-        if (!job.jobId || job.completed || job.error) continue
-        const cameraId = Number(cameraIdText)
-        apiRequest<UploadJob>(`/api/uploads/${job.jobId}`)
-          .then((status) => {
-            updateUploadJob(cameraId, {
-              ...job,
-              progress: status.progress ?? job.progress,
-              completed: Boolean(status.completed),
-              ...(status.error ? { error: status.error } : {}),
-            })
-            apiBlob(`/api/uploads/${job.jobId}/frame`)
-              .then((blob) => {
-                const url = URL.createObjectURL(blob)
-                const previous = frameUrlsRef.current[cameraId]
-                if (previous) URL.revokeObjectURL(previous)
-                frameUrlsRef.current[cameraId] = url
-                setFrames((current) => ({ ...current, [cameraId]: url }))
-              })
-              .catch(() => undefined)
-          })
-          .catch((statusError: unknown) => {
-            updateUploadJob(cameraId, { ...job, error: errorMessage(statusError) })
-          })
-      }
-    }, 1200)
-    return () => window.clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      apiRequest<DetectionEvent[]>('/api/events').then(setEvents).catch((refreshError: unknown) => setError(errorMessage(refreshError)))
-    }, 5000)
-    return () => window.clearInterval(interval)
-  }, [])
-
-  useEffect(
-    () => () => {
-      Object.values(frameUrlsRef.current).forEach(URL.revokeObjectURL)
-    },
-    [],
-  )
-
   async function startCamera(camera: CameraRecord) {
     setError('')
-    setFrames((current) => ({ ...current, [camera.id]: '' }))
     try {
-      const source = sources[camera.id] ?? 'webcam'
-      await apiRequest<CameraVisionStatus>(`/api/cameras/${camera.id}/vision/start`, {
+      const source = sources[camera.id] ?? savedCameraSource(camera.id)
+      const status = await apiRequest<CameraVisionStatus>(`/api/cameras/${camera.id}/vision/start`, {
         method: 'POST',
         body: JSON.stringify({ source }),
       })
-      setActiveCameras((current) => ({ ...current, [camera.id]: true }))
+      updateCameraStatus(camera.id, status)
+      void refreshCameraStatuses()
     } catch (startError) {
-      setCameraStatuses((current) => ({
-        ...current,
-        [camera.id]: { camera_id: camera.id, status: 'Error', error: errorMessage(startError) },
-      }))
+      updateCameraStatus(camera.id, { camera_id: camera.id, status: 'Error', error: errorMessage(startError), running: false })
       setError(errorMessage(startError))
     }
   }
@@ -187,8 +95,8 @@ export function LiveMonitoringPage() {
     setError('')
     try {
       const status = await apiRequest<CameraVisionStatus>(`/api/cameras/${cameraId}/vision/stop`, { method: 'POST' })
-      setCameraStatuses((current) => ({ ...current, [cameraId]: status }))
-      setActiveCameras((current) => ({ ...current, [cameraId]: false }))
+      updateCameraStatus(cameraId, status)
+      void refreshCameraStatuses()
     } catch (stopError) {
       setError(errorMessage(stopError))
     }
@@ -207,7 +115,7 @@ export function LiveMonitoringPage() {
         `/api/cameras/${camera.id}/events`,
         { method: 'DELETE' },
       )
-      setEvents((current) => current.filter((event) => event.camera_id !== camera.id))
+      await refreshEvents()
     } catch (clearError) {
       setError(errorMessage(clearError))
     } finally {
@@ -226,16 +134,23 @@ export function LiveMonitoringPage() {
       setError('The MP4 must be 100 MB or smaller.')
       return
     }
-    updateUploadJob(cameraId, { jobId: '', progress: 0, completed: false })
-    setTransferProgress((current) => ({ ...current, [cameraId]: 0 }))
+    updateTransferProgress(cameraId, 0)
     try {
       const result = await uploadVideo(cameraId, file, (progress) => {
-        setTransferProgress((current) => ({ ...current, [cameraId]: progress }))
+        updateTransferProgress(cameraId, progress)
       })
-      updateUploadJob(cameraId, { jobId: result.job_id ?? '', progress: 0, completed: false })
-      setTransferProgress((current) => ({ ...current, [cameraId]: 100 }))
+      updateCameraStatus(cameraId, result)
+      updateTransferProgress(cameraId, null)
+      void refreshCameraStatuses()
     } catch (uploadError) {
-      updateUploadJob(cameraId, { jobId: '', progress: 0, completed: false, error: errorMessage(uploadError) })
+      updateCameraStatus(cameraId, {
+        camera_id: cameraId,
+        source_type: 'upload',
+        status: 'Error',
+        error: errorMessage(uploadError),
+        running: false,
+      })
+      updateTransferProgress(cameraId, null)
       setError(errorMessage(uploadError))
     }
   }
@@ -250,7 +165,7 @@ export function LiveMonitoringPage() {
         </div>
       </div>
 
-      {error ? <div role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
+      {error || sharedError ? <div role="alert" className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error || sharedError}</div> : null}
       {models ? (
         <div className="flex flex-wrap gap-3 rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3 text-xs">
           <span className="text-slate-400">Person detection: YOLOv8n</span>
@@ -268,13 +183,9 @@ export function LiveMonitoringPage() {
       <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
         {cameras.map((camera) => {
           const status = cameraStatuses[camera.id] ?? { camera_id: camera.id, status: 'Not connected' as const }
-          const job = uploadJobs[camera.id]
-          const liveActive = activeCameras[camera.id] ?? status.status === 'Connected'
+          const liveActive = status.source_type !== 'upload' && (status.running ?? status.status === 'Connected')
+          const uploadActive = status.source_type === 'upload' && Boolean(status.running) && !status.completed
           const uploadPercent = transferProgress[camera.id]
-          const uploadActive = !job?.error && (
-            (!job?.jobId && uploadPercent !== undefined && uploadPercent < 100) ||
-            (Boolean(job?.jobId) && !job?.completed)
-          )
           return (
             <article key={camera.id} className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
               <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
@@ -294,7 +205,7 @@ export function LiveMonitoringPage() {
                     <span className="text-xs">{status.status === 'Error' ? status.error : 'No processed frame'}</span>
                   </div>
                 )}
-                {job?.jobId && !liveActive ? <span className="absolute left-2 top-2 rounded bg-slate-950/80 px-2 py-1 text-[10px] text-slate-200">Uploaded MP4 · not live</span> : null}
+                {status.source_type === 'upload' ? <span className="absolute left-2 top-2 rounded bg-slate-950/80 px-2 py-1 text-[10px] text-slate-200">Uploaded MP4 · not live</span> : null}
               </div>
 
               <div className="space-y-4 p-4">
@@ -302,8 +213,12 @@ export function LiveMonitoringPage() {
                   Live input
                   <select
                     className={inputClass}
-                    value={sources[camera.id] ?? 'webcam'}
-                    onChange={(event) => setSources((current) => ({ ...current, [camera.id]: event.target.value as CameraSource }))}
+                    value={sources[camera.id] ?? savedCameraSource(camera.id)}
+                    onChange={(event) => {
+                      const source = event.target.value as CameraSource
+                      window.localStorage.setItem(`safety_live_input_${camera.id}`, source)
+                      setSources((current) => ({ ...current, [camera.id]: source }))
+                    }}
                     disabled={liveActive || uploadActive}
                   >
                     <option value="webcam">Laptop webcam (device 0)</option>
@@ -335,22 +250,22 @@ export function LiveMonitoringPage() {
                     />
                   </label>
                 </div>
-                {transferProgress[camera.id] !== undefined && transferProgress[camera.id] < 100 ? (
+                {uploadPercent !== undefined && uploadPercent < 100 ? (
                   <div>
-                    <div className="mb-1 flex justify-between text-xs text-slate-400"><span>Uploading MP4</span><span>{transferProgress[camera.id]}%</span></div>
-                    <progress className="h-2 w-full accent-blue-500" max="100" value={transferProgress[camera.id]} />
+                    <div className="mb-1 flex justify-between text-xs text-slate-400"><span>Uploading MP4</span><span>{uploadPercent}%</span></div>
+                    <progress className="h-2 w-full accent-blue-500" max="100" value={uploadPercent} />
                   </div>
                 ) : null}
-                {job?.jobId ? (
+                {status.source_type === 'upload' ? (
                   <div>
                     <div className="mb-1 flex justify-between text-xs text-slate-400">
-                      <span>{job.error ? 'Processing error' : job.completed ? 'Video analysis complete' : 'Analyzing uploaded video'}</span>
-                      <span>{Math.round(job.progress)}%</span>
+                      <span>{status.error ? 'Processing error' : status.completed ? 'Video analysis complete' : 'Analyzing uploaded video'}</span>
+                      <span>{Math.round(status.progress ?? 0)}%</span>
                     </div>
-                    <progress className="h-2 w-full accent-emerald-500" max="100" value={job.progress} />
-                    {job.error ? <p role="alert" className="mt-1 text-xs text-red-300">{job.error}</p> : null}
+                    <progress className="h-2 w-full accent-emerald-500" max="100" value={status.progress ?? 0} />
+                    {status.error ? <p role="alert" className="mt-1 text-xs text-red-300">{status.error}</p> : null}
                   </div>
-                ) : job?.error ? <p role="alert" className="text-xs text-red-300">{job.error}</p> : null}
+                ) : null}
                 <div className="flex items-center justify-between border-t border-slate-800 pt-3 text-xs text-slate-400">
                   <span>{zones.filter((zone) => zone.camera_id === null || zone.camera_id === camera.id).length} monitored zones</span>
                   {status.status === 'Error' ? <span className="max-w-[60%] text-right text-red-300">{status.error}</span> : null}

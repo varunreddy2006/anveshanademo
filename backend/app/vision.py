@@ -26,6 +26,7 @@ class WorkerState:
     processed_frames: int = 0
     total_frames: int | None = None
     completed: bool = False
+    started_at: float = field(default_factory=time.monotonic)
     last_event_at: dict[str, float] = field(default_factory=dict)
     last_restricted_entry_at: dict[str, float] = field(default_factory=dict)
     last_crowding_event_at: dict[str, float] = field(default_factory=dict)
@@ -123,7 +124,19 @@ def worker_snapshot(state: WorkerState) -> dict[str, Any]:
             "processed_frames": state.processed_frames,
             "total_frames": state.total_frames,
             "completed": state.completed,
+            "running": state.thread is not None and state.thread.is_alive() and not state.stop_event.is_set(),
+            "has_frame": state.latest_frame is not None,
         }
+
+
+def camera_worker(camera_id: int) -> WorkerState | None:
+    with _workers_lock:
+        candidates = [
+            state
+            for state in _workers.values()
+            if state.camera_id == camera_id and (state.key == f"camera-{camera_id}" or state.key.startswith("upload-"))
+        ]
+        return max(candidates, key=lambda state: state.started_at, default=None)
 
 
 def latest_frame(state: WorkerState) -> bytes | None:

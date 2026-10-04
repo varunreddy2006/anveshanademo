@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { DashboardLiveDataProvider } from './DashboardLiveData'
 import {
   AlertTriangle,
   Camera,
@@ -121,7 +122,9 @@ export function DashboardLayout() {
           </header>
 
           <div className="p-4 lg:p-6">
-            <Outlet />
+            <DashboardLiveDataProvider>
+              <Outlet />
+            </DashboardLiveDataProvider>
           </div>
         </div>
       </div>

@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Camera as CameraIcon, Pe
 import { type FormEvent, type PointerEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import { apiBlob, apiRequest, type Camera, type RiskHistoryPoint, type Zone, type ZoneInput, type ZoneRisk, type ZoneType } from '../lib/api'
+import { useDashboardLiveData } from '../components/layout/DashboardLiveDataContext'
 
 const riskBands = [
   { max: 33, label: 'Low', classes: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300', stroke: '#34d399' },
@@ -12,15 +13,6 @@ const riskBands = [
 
 function riskBand(score: number) {
   return riskBands.find((band) => score <= band.max) ?? riskBands[riskBands.length - 1]
-}
-
-function isAdministrator() {
-  try {
-    const user: unknown = JSON.parse(window.localStorage.getItem('safety_user') ?? 'null')
-    return typeof user === 'object' && user !== null && 'role' in user && user.role === 'administrator'
-  } catch {
-    return false
-  }
 }
 
 function canClearDetectionData() {
@@ -240,6 +232,8 @@ function formFromZone(zone: Zone): ZoneFormState {
 
 function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
   const band = riskBand(risk.score)
+  const simulated = risk.simulated_demo
+  const simulatedBand = simulated ? riskBand(simulated.score) : null
   const TrendIcon = risk.trend === 'increasing' ? ArrowUp : risk.trend === 'decreasing' ? ArrowDown : ArrowRight
   const realPath = chartPath(risk.history, risk, false)
   const simulatedPath = chartPath(risk.history, risk, true)
@@ -247,6 +241,8 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
   const projectedX = 310
   const currentY = 90 - risk.score * 0.8
   const projectedY = 90 - risk.projected_score * 0.8
+  const simulatedCurrentY = simulated ? 90 - simulated.score * 0.8 : 0
+  const simulatedProjectedY = simulated ? 90 - simulated.projected_score * 0.8 : 0
 
   return (
     <article className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
@@ -289,6 +285,34 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
 
       <p className="mt-4 min-h-10 text-sm leading-5 text-slate-400">{risk.explanation}</p>
 
+      {simulated ? (
+        <div className="mt-4 rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/5 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-fuchsia-200">SIMULATED demo history</p>
+            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${simulatedBand?.classes}`}>
+              {simulatedBand?.label} · {simulated.trend}
+            </span>
+          </div>
+          <p className="mt-2 text-sm text-fuchsia-100">
+            Simulated score: <strong>{simulated.score}/100</strong>
+            <span className="px-2 text-fuchsia-400">·</span>
+            5-minute projection: <strong>{simulated.projected_score}/100</strong>
+          </p>
+          <p className="mt-1 text-xs text-fuchsia-100/70">{simulated.velocity > 0 ? '+' : ''}{simulated.velocity.toFixed(1)} points/min</p>
+          {simulated.score > 70 && simulated.trend === 'increasing' ? (
+            <p role="status" className="mt-2 flex items-center gap-2 text-sm font-medium text-orange-200">
+              <AlertTriangle className="h-4 w-4" /> SIMULATED · Predictive warning
+            </p>
+          ) : null}
+          {simulated.rapid_escalation ? (
+            <p role="status" className="mt-2 flex items-center gap-2 text-sm font-medium text-red-200">
+              <AlertTriangle className="h-4 w-4" /> SIMULATED · Rapid risk escalation
+            </p>
+          ) : null}
+          <p className="mt-2 text-sm leading-5 text-fuchsia-100/80">{simulated.explanation}</p>
+        </div>
+      ) : null}
+
       <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/40 p-3">
         <div className="mb-2 flex items-center justify-between">
           <p className="text-xs font-medium text-slate-300">Risk trend · last hour</p>
@@ -299,6 +323,7 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
           <path d={realPath} fill="none" stroke={band.stroke} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
           {simulatedPath ? <path d={simulatedPath} fill="none" stroke="#e879f9" strokeWidth="2" strokeDasharray="4 4" strokeLinejoin="round" /> : null}
           <path d={`M${currentX.toFixed(1)},${currentY.toFixed(1)} L${projectedX},${projectedY.toFixed(1)}`} fill="none" stroke={band.stroke} strokeWidth="2" strokeDasharray="5 4" />
+          {simulated ? <path d={`M${currentX.toFixed(1)},${simulatedCurrentY.toFixed(1)} L${projectedX},${simulatedProjectedY.toFixed(1)}`} fill="none" stroke="#e879f9" strokeWidth="2" strokeDasharray="2 4" /> : null}
           <text x="10" y="99" fill="#64748b" fontSize="8">−60m</text>
           <text x="270" y="99" fill="#64748b" fontSize="8">now</text>
           <text x="294" y="99" fill="#64748b" fontSize="8">+5m</text>
@@ -315,14 +340,13 @@ function ZoneRiskCard({ risk }: { risk: ZoneRisk }) {
 }
 
 export function ZoneRiskPage() {
+  const { riskScores, refreshRiskScores, refreshEvents } = useDashboardLiveData()
   const [zones, setZones] = useState<Zone[]>([])
   const [cameras, setCameras] = useState<Camera[]>([])
-  const [riskScores, setRiskScores] = useState<ZoneRisk[]>([])
   const [loading, setLoading] = useState(true)
   const [riskActionBusy, setRiskActionBusy] = useState(false)
   const [detectionResetBusy, setDetectionResetBusy] = useState(false)
   const [resetNotice, setResetNotice] = useState('')
-  const [isAdmin] = useState(isAdministrator)
   const [canClearDetection] = useState(canClearDetectionData)
   const [saving, setSaving] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
@@ -351,24 +375,13 @@ export function ZoneRiskPage() {
     Promise.all([
       apiRequest<Zone[]>('/api/zones'),
       apiRequest<Camera[]>('/api/cameras'),
-      apiRequest<ZoneRisk[]>('/api/risk/zones'),
     ])
-      .then(([loadedZones, loadedCameras, loadedRisk]) => {
+      .then(([loadedZones, loadedCameras]) => {
         setZones(loadedZones)
         setCameras(loadedCameras)
-        setRiskScores(loadedRisk)
       })
       .catch((loadError: unknown) => setError(getErrorMessage(loadError)))
       .finally(() => setLoading(false))
-  }, [])
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      apiRequest<ZoneRisk[]>('/api/risk/zones')
-        .then(setRiskScores)
-        .catch((loadError: unknown) => setError(getErrorMessage(loadError)))
-    }, 5000)
-    return () => window.clearInterval(interval)
   }, [])
 
   async function changeSimulatedHistory(action: 'seed' | 'clear') {
@@ -379,7 +392,7 @@ export function ZoneRiskPage() {
         '/api/risk/simulated-history',
         { method: action === 'seed' ? 'POST' : 'DELETE' },
       )
-      setRiskScores(await apiRequest<ZoneRisk[]>('/api/risk/zones'))
+      await refreshRiskScores()
     } catch (requestError) {
       setError(getErrorMessage(requestError))
     } finally {
@@ -403,7 +416,7 @@ export function ZoneRiskPage() {
         evidence_deleted: number
         risk_history_deleted: number
       }>('/api/detection-data', { method: 'DELETE' })
-      setRiskScores(await apiRequest<ZoneRisk[]>('/api/risk/zones'))
+      await Promise.all([refreshRiskScores(), refreshEvents()])
       setResetNotice(
         `Cleared ${result.events_deleted} events, ${result.alerts_deleted} alerts, ${result.evidence_deleted} evidence frames, and ${result.risk_history_deleted} real risk-history points.`,
       )
@@ -585,7 +598,7 @@ export function ZoneRiskPage() {
               An indicator calculated from deduplicated detection events with time decay. Projections are not validated predictions.
             </p>
           </div>
-          {isAdmin ? (
+          {canClearDetection ? (
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"

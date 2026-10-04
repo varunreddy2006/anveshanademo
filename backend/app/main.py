@@ -859,12 +859,27 @@ def list_zone_risk(
             .all()
         )
         history = sorted(real_history + simulated_history, key=lambda entry: entry.recorded_at)
+        latest_simulated = max(simulated_history, key=lambda entry: entry.recorded_at, default=None)
+        simulated_demo = (
+            {
+                "score": latest_simulated.score,
+                "trend": latest_simulated.trend,
+                "velocity": latest_simulated.velocity,
+                "rapid_escalation": latest_simulated.velocity >= settings.risk_rapid_escalation_velocity,
+                "projected_score": latest_simulated.projected_score,
+                "explanation": latest_simulated.explanation,
+                "updated_at": serialize_utc_datetime(latest_simulated.recorded_at),
+            }
+            if latest_simulated is not None
+            else None
+        )
         results.append(
             {
                 "zone_id": zone.id,
                 "zone_name": zone.name,
                 "zone_type": zone.zone_type or ZoneType.NORMAL.value,
                 **calculate_zone_risk(db, zone, zones, now),
+                "simulated_demo": simulated_demo,
                 "history": [risk_history_payload(entry) for entry in history],
             }
         )
@@ -873,18 +888,36 @@ def list_zone_risk(
 
 @app.post(f"{settings.api_v1_prefix}/risk/simulated-history")
 def seed_simulated_risk_history(
-    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    current_user: User = Depends(
+        require_roles([UserRole.ADMINISTRATOR.value, UserRole.SAFETY_OFFICER.value])
+    ),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
     db.query(RiskScoreHistory).filter(RiskScoreHistory.is_simulated.is_(True)).delete(synchronize_session=False)
     zones = db.query(Zone).order_by(Zone.id).all()
     now = datetime.now(timezone.utc)
     for zone_index, zone in enumerate(zones):
-        previous_score = 15 + zone_index * 8
+        previous_score: int | None = None
         for point_index in range(12):
-            recorded_at = now - timedelta(minutes=55 - point_index * 5)
-            score = max(0, min(100, 15 + zone_index * 8 + point_index * (3 + zone_index % 3)))
-            velocity = round((score - previous_score) / 5, 2) if point_index else 0.0
+            recorded_at = now - timedelta(minutes=11 - point_index)
+            if zone_index == 0:
+                score = 30 + point_index * 5
+                explanation = (
+                    "SIMULATED demo: Risk increased by 25 points in the last 5 minutes "
+                    "due to 2 simulated restricted-zone entries."
+                )
+            elif zone_index == 1:
+                score = point_index * 9
+                explanation = (
+                    "SIMULATED demo: Risk is escalating rapidly due to simulated hazard-proximity events."
+                )
+            elif zone_index == 2:
+                score = 20
+                explanation = "SIMULATED demo: Risk remained stable in the green band with no simulated events."
+            else:
+                score = 20
+                explanation = f"SIMULATED demo: Risk remained stable in the green band for {zone.name}."
+            velocity = round((score - previous_score), 2) if previous_score is not None else 0.0
             db.add(
                 RiskScoreHistory(
                     zone_id=zone.id,
@@ -892,7 +925,7 @@ def seed_simulated_risk_history(
                     trend=risk_trend(velocity),
                     velocity=velocity,
                     projected_score=project_score(score, velocity),
-                    explanation=f"SIMULATED history for {zone.name}; this is not a real detection.",
+                    explanation=explanation,
                     is_simulated=True,
                     recorded_at=recorded_at,
                 )
@@ -904,7 +937,9 @@ def seed_simulated_risk_history(
 
 @app.delete(f"{settings.api_v1_prefix}/risk/simulated-history")
 def clear_simulated_risk_history(
-    current_user: User = Depends(require_roles([UserRole.ADMINISTRATOR.value])),
+    current_user: User = Depends(
+        require_roles([UserRole.ADMINISTRATOR.value, UserRole.SAFETY_OFFICER.value])
+    ),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
     deleted = (
@@ -1162,8 +1197,17 @@ def camera_vision_status(
 ) -> dict[str, Any]:
     if db.query(Camera).filter(Camera.id == camera_id).first() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
-    worker = vision.get_worker(f"camera-{camera_id}")
-    return vision.worker_snapshot(worker) if worker else {"camera_id": camera_id, "status": "Not connected"}
+    worker = vision.camera_worker(camera_id)
+    return (
+        vision.worker_snapshot(worker)
+        if worker
+        else {
+            "camera_id": camera_id,
+            "status": "Not connected",
+            "running": False,
+            "has_frame": False,
+        }
+    )
 
 
 @app.get(f"{settings.api_v1_prefix}/cameras/{{camera_id}}/vision/frame")
@@ -1174,7 +1218,7 @@ def camera_vision_frame(
 ):
     if db.query(Camera).filter(Camera.id == camera_id).first() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
-    worker = vision.get_worker(f"camera-{camera_id}")
+    worker = vision.camera_worker(camera_id)
     frame = vision.latest_frame(worker) if worker else None
     if frame is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No processed frame is available")
